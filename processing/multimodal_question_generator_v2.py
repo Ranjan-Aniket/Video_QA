@@ -819,17 +819,21 @@ class PremiumFrameAnalyzer:
             timestamp = frame.get("timestamp", 0)
             return (is_key, complexity_map.get(complexity, 2), -timestamp)
 
-        agreed_frames.sort(key=get_frame_priority, reverse=True)
-        disagreed_frames.sort(key=get_frame_priority, reverse=True)
+        # Combine all premium frames and sort by priority
+        # FIX: When GPT-4V refuses to analyze images with people, consensus always fails
+        # Solution: Use ALL premium frames for both models, let dynamic allocation decide counts
+        all_premium = agreed_frames + disagreed_frames
+        all_premium.sort(key=get_frame_priority, reverse=True)
 
         logger.info(f"   Premium frames with AI consensus: {len(ai_descriptions)}")
-        logger.info(f"   Agreed frames (GPT-4V & Claude agree): {len(agreed_frames)}")
-        logger.info(f"   Disagreed frames (potential adversarial): {len(disagreed_frames)}")
+        logger.info(f"   Consensus-based agreed: {len(agreed_frames)}")
+        logger.info(f"   Consensus-based disagreed: {len(disagreed_frames)}")
+        logger.info(f"   ✓ Using all {len(all_premium)} premium frames for both GPT-4V and Claude")
         logger.info(f"   ✓ Frames sorted by: key_frame > complexity > recency")
 
         return {
-            "agreed_frames": agreed_frames,
-            "disagreed_frames": disagreed_frames,
+            "agreed_frames": all_premium,  # All frames available for GPT-4V
+            "disagreed_frames": all_premium,  # All frames available for Claude
             "ai_descriptions": ai_descriptions
         }
 
