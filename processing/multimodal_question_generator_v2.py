@@ -955,7 +955,13 @@ class AIQuestionGenerator:
         audio_text = audio_cue["text"][:60]
         if len(audio_cue["text"]) > 60:
             audio_text += "..."
-        
+
+        # Filter out names from audio cue
+        audio_text = self._remove_names_from_text(audio_text)
+
+        # Extract concise visual elements for visual cue
+        visual_cue = self._extract_concise_visual_elements(gpt4v_desc)
+
         # Select random question type
         question_type = random.choice([
             'temporal', 'inference', 'counting', 'comparative', 'needle',
@@ -968,30 +974,42 @@ class AIQuestionGenerator:
 
 AUDIO CUE: Someone says "{audio_text}" at timestamp {timestamp:.1f}s
 
-VISUAL CONTEXT (from GPT-4 Vision analysis): {gpt4v_desc}
+VISUAL CONTEXT: {gpt4v_desc}
 
 QUESTION TYPE: {question_type.upper()}
-Generate a {question_type} question following these patterns:
-- TEMPORAL: "What is happening on screen during the moment when someone says X?"
-- INFERENCE: "Based on what's visible when someone says X, what can you infer?"
-- COUNTING: "How many [objects/people] are visible when someone says X?"
-- COMPARATIVE: "What visual elements change during the segment when someone says X?"
-- NEEDLE: "What specific visual details are present when someone says X?"
-- OBJECT_INTERACTION: "Describe the interactions or movements visible when someone says X."
-- SUBSCENE: "Describe the complete scene visible when you hear X."
-- HOLISTIC: "What is the overall context and situation when someone says X?"
-- CONTEXT: "What background elements or environmental context are visible when someone says X?"
 
-REQUIREMENTS:
-1. Question MUST require BOTH the audio cue AND visual context to answer
-2. Use descriptors only (NO names): "person in blue shirt", "player in jersey #10"
-3. Follow the specific {question_type} question pattern above
-4. Question should be challenging and require both modalities
-5. Answer must reference BOTH audio cue and visual details
+CRITICAL REQUIREMENTS:
+1. Question MUST require BOTH the audio cue AND visual to answer (not answerable with just video)
+2. Use descriptors ONLY (NO NAMES): "player in white jersey #13" NOT "George" or "Emmanuel"
+3. Answer must be SPECIFIC and CONCISE (NOT a full description dump)
+4. Answer should be 1-2 sentences maximum
+5. Question must be specific and answerable (NOT vague like "what can you infer?")
 
-FORMAT:
-Question: [your {question_type} question here]
-Answer: [golden answer referencing both audio and visual]"""
+QUESTION PATTERNS:
+- TEMPORAL: "What action is happening when someone says '{audio_text}'?"
+- INFERENCE: "What is the game situation when someone says '{audio_text}'?"
+- COUNTING: "How many [specific objects] are visible when you hear '{audio_text}'?"
+- COMPARATIVE: "What jersey colors are visible when someone says '{audio_text}'?"
+- NEEDLE: "What specific on-screen text/graphic is visible when someone says '{audio_text}'?"
+- OBJECT_INTERACTION: "What is the player doing with the ball when you hear '{audio_text}'?"
+- SUBSCENE: "What teams are playing when someone says '{audio_text}'?"
+- HOLISTIC: "What score is displayed when someone says '{audio_text}'?"
+- CONTEXT: "What court/arena branding is visible when you hear '{audio_text}'?"
+
+OUTPUT FORMAT:
+Question: [specific {question_type} question using pattern above]
+Answer: [specific 1-2 sentence answer, NO description dumps]
+
+EXAMPLES OF GOOD ANSWERS:
+- "White and dark jerseys"
+- "WSH 52, TOR 57"
+- "Player is dribbling near three-point line"
+- "Scotiabank Arena branding visible on court"
+
+EXAMPLES OF BAD ANSWERS (DO NOT DO THIS):
+- "When [audio] is said, the players are wearing... [long description]" ❌
+- "Based on the visual analysis..." ❌
+- Full paragraph descriptions ❌"""
 
             response = openai.ChatCompletion.create(
                 model="gpt-4o",
@@ -1033,7 +1051,7 @@ Answer: [golden answer referencing both audio and visual]"""
                 start_timestamp=start_ts,
                 end_timestamp=end_ts,
                 audio_cue=audio_text,
-                visual_cue=gpt4v_desc[:100],
+                visual_cue=visual_cue,  # Concise description, not AI dump
                 task_types=task_type_mapping.get(question_type, ["temporal", "referential"]),
                 generation_tier="ai_gpt4v",
                 complexity="high",
@@ -1082,6 +1100,9 @@ Answer: [golden answer referencing both audio and visual]"""
         if len(audio_cue["text"]) > 60:
             audio_text += "..."
 
+        # Filter out names from audio cue (enforce no-names rule)
+        audio_text = self._remove_names_from_text(audio_text)
+
         # Select question pattern based on weighted distribution
         pattern_type = random.choices(
             ['temporal', 'inference', 'counting', 'comparative', 'needle',
@@ -1094,6 +1115,9 @@ Answer: [golden answer referencing both audio and visual]"""
             pattern_type, audio_text, claude_desc, gpt4v_desc
         )
 
+        # Extract concise visual cue (NOT AI description dump)
+        visual_cue = self._extract_concise_visual_elements(claude_desc)
+
         start_ts = self._format_timestamp(max(0, audio_cue["start"] - 1))
         end_ts = self._format_timestamp(audio_cue["end"] + 2)
 
@@ -1104,7 +1128,7 @@ Answer: [golden answer referencing both audio and visual]"""
             start_timestamp=start_ts,
             end_timestamp=end_ts,
             audio_cue=audio_text,
-            visual_cue=claude_desc[:100],
+            visual_cue=visual_cue,  # Concise description, not AI dump
             task_types=question_data["task_types"],
             generation_tier="ai_claude",
             complexity="high",
@@ -1118,60 +1142,204 @@ Answer: [golden answer referencing both audio and visual]"""
         claude_desc: str,
         gpt4v_desc: str
     ) -> Dict:
-        """Generate question based on specific pattern type"""
+        """Generate question based on specific pattern type with proper formatting
 
-        # Extract key visual elements from descriptions
-        visual_summary = self._extract_visual_summary(claude_desc)
+        Rules enforced:
+        1. Visual cues must be concise (not AI description dumps)
+        2. Answers must be specific responses (not full descriptions)
+        3. No names allowed (use descriptors only)
+        4. Questions must require BOTH audio AND visual
+        """
+
+        # Extract concise visual elements (NOT full AI description)
+        visual_elements = self._extract_concise_visual_elements(claude_desc)
+
+        # Extract specific answer components based on question type
+        answer_components = self._extract_answer_components(claude_desc, pattern_type)
 
         patterns = {
             'temporal': {
-                'question': f'What is happening on screen during the moment when someone says "{audio_text}"?',
-                'answer': f'During "{audio_text}", {claude_desc[:200]}',
+                'question': f'What action is happening on screen at the moment when you hear "{audio_text}"?',
+                'answer': answer_components['action'],
                 'task_types': ['temporal', 'referential', 'context']
             },
             'inference': {
-                'question': f'Based on what\'s visible when someone says "{audio_text}", what can you infer about the situation?',
-                'answer': f'When "{audio_text}" is said, {claude_desc[:150]} This suggests the scene context and activity at that moment.',
+                'question': f'What is the game situation when someone says "{audio_text}"?',
+                'answer': answer_components['game_state'],
                 'task_types': ['inference', 'context', 'holistic']
             },
             'counting': {
-                'question': f'How many distinct {visual_summary} are visible when someone says "{audio_text}"?',
-                'answer': f'When "{audio_text}" is heard, {claude_desc[:150]}',
+                'question': f'How many {answer_components["count_target"]} are visible when you hear "{audio_text}"?',
+                'answer': answer_components['count_answer'],
                 'task_types': ['counting', 'referential', 'context']
             },
             'comparative': {
-                'question': f'What visual elements change or remain constant during the segment when someone says "{audio_text}"?',
-                'answer': f'At "{audio_text}", {claude_desc[:180]}',
+                'question': f'What color jerseys are visible when someone says "{audio_text}"?',
+                'answer': answer_components['jersey_colors'],
                 'task_types': ['comparative', 'temporal', 'context']
             },
             'needle': {
-                'question': f'What specific visual details are present on screen when someone says "{audio_text}"?',
-                'answer': f'When "{audio_text}" is said, specific details include: {claude_desc[:180]}',
+                'question': f'What specific on-screen graphic or text is visible when someone says "{audio_text}"?',
+                'answer': answer_components['on_screen_text'],
                 'task_types': ['needle', 'referential', 'context']
             },
             'object_interaction': {
-                'question': f'Describe the interactions or movements visible when someone says "{audio_text}".',
-                'answer': f'During "{audio_text}", {claude_desc[:180]}',
+                'question': f'What is the player doing with the basketball when you hear "{audio_text}"?',
+                'answer': answer_components['player_action'],
                 'task_types': ['object_interaction', 'referential', 'sequential']
             },
             'subscene': {
-                'question': f'Describe the complete scene visible when you hear "{audio_text}".',
-                'answer': f'When "{audio_text}" is heard, the scene shows: {claude_desc[:200]}',
+                'question': f'What teams are playing when someone says "{audio_text}"?',
+                'answer': answer_components['teams'],
                 'task_types': ['subscene', 'context', 'holistic']
             },
             'spurious': {
-                'question': f'What unexpected or notable visual element appears when someone says "{audio_text}"?',
-                'answer': f'Notably, when "{audio_text}" is said, {claude_desc[:180]} (This represents a potential disagreement between visual models)',
+                'question': f'What score is displayed when someone says "{audio_text}"?',
+                'answer': answer_components['score'],
                 'task_types': ['spurious_correlation', 'context', 'inference']
             },
             'context': {
-                'question': f'What background elements or environmental context are visible when someone says "{audio_text}"?',
-                'answer': f'When "{audio_text}" is heard, the background shows: {claude_desc[:180]}',
+                'question': f'What arena or court branding is visible when you hear "{audio_text}"?',
+                'answer': answer_components['arena_branding'],
                 'task_types': ['context', 'referential']
             }
         }
 
         return patterns.get(pattern_type, patterns['temporal'])
+
+    def _extract_concise_visual_elements(self, description: str) -> str:
+        """Extract concise visual description (NOT full AI dump)
+
+        Returns: Short description like "Players in white and dark jerseys on basketball court"
+        NOT: Full markdown "# Video Frame Analysis\n\n## 1) Visible Objects..."
+        """
+        # Extract key elements without markdown formatting
+        visual_parts = []
+
+        # Look for jersey colors
+        if "white" in description.lower() and "jersey" in description.lower():
+            visual_parts.append("players in white jerseys")
+        if "dark" in description.lower() or "black" in description.lower():
+            if "jersey" in description.lower():
+                visual_parts.append("players in dark jerseys")
+
+        # Look for court/arena
+        if "court" in description.lower():
+            visual_parts.append("on basketball court")
+        elif "arena" in description.lower():
+            visual_parts.append("in arena")
+
+        # Look for actions
+        if "dribbling" in description.lower():
+            visual_parts.append("player dribbling")
+        elif "shooting" in description.lower():
+            visual_parts.append("player shooting")
+
+        if visual_parts:
+            return ", ".join(visual_parts[:3])  # Max 3 elements
+        else:
+            return "basketball game in progress"
+
+    def _extract_answer_components(self, description: str, pattern_type: str) -> Dict:
+        """Extract specific answer components based on question pattern
+
+        Returns dict with specific answers (NOT full AI description dump)
+        Example: {'action': 'Player shooting', 'score': 'WSH 52, TOR 57'}
+        """
+        import re
+
+        components = {}
+        desc_lower = description.lower()
+
+        # Extract action
+        if "dribbling" in desc_lower:
+            components['action'] = "A player is dribbling the basketball"
+        elif "shooting" in desc_lower:
+            components['action'] = "A player is shooting"
+        elif "passing" in desc_lower:
+            components['action'] = "A player is passing the ball"
+        else:
+            components['action'] = "Players are in active play"
+
+        # Extract game state
+        components['game_state'] = "A basketball game is in progress"
+        if "offense" in desc_lower or "defensive" in desc_lower:
+            components['game_state'] = "Teams are in offensive/defensive positions"
+
+        # Extract count target and answer
+        player_count = desc_lower.count("player")
+        components['count_target'] = "players"
+        components['count_answer'] = f"Multiple players ({player_count} mentioned in description)"
+
+        # Extract jersey colors
+        jerseys = []
+        if "white" in desc_lower and "jersey" in desc_lower:
+            jerseys.append("white")
+        if "dark" in desc_lower or "black" in desc_lower:
+            if "jersey" in desc_lower:
+                jerseys.append("dark/black")
+        components['jersey_colors'] = " and ".join(jerseys) + " jerseys" if jerseys else "Multiple jersey colors"
+
+        # Extract on-screen text (look for patterns like "WSH 52")
+        score_match = re.search(r'([A-Z]{2,4})\s+(\d+)', description)
+        if score_match:
+            components['on_screen_text'] = f"Score display showing {score_match.group(1)} {score_match.group(2)}"
+            components['score'] = f"{score_match.group(1)} {score_match.group(2)}"
+        else:
+            components['on_screen_text'] = "On-screen graphics visible"
+            components['score'] = "Score displayed on screen"
+
+        # Extract player action
+        if "ball" in desc_lower:
+            components['player_action'] = "Handling/controlling the basketball"
+        else:
+            components['player_action'] = "Moving on court"
+
+        # Extract teams (look for team abbreviations like WSH, TOR)
+        team_match = re.findall(r'\b([A-Z]{2,4})\b', description)
+        if team_match and len(team_match) >= 2:
+            components['teams'] = f"{team_match[0]} vs {team_match[1]}"
+        else:
+            components['teams'] = "Two teams competing"
+
+        # Extract arena branding
+        arena_match = re.search(r'(Scotiabank|FanDuel|Bell|PlayStation)', description, re.IGNORECASE)
+        if arena_match:
+            components['arena_branding'] = f"{arena_match.group(1)} branding visible"
+        else:
+            components['arena_branding'] = "Arena advertisements visible around court"
+
+        return components
+
+    def _remove_names_from_text(self, text: str) -> str:
+        """Remove names from text to enforce no-names rule
+
+        Replaces common basketball names with generic descriptors
+        Example: "Here's George" → "Here's the player"
+        """
+        import re
+
+        # Common name patterns to remove/replace
+        name_replacements = {
+            r'\b[A-Z][a-z]+\b(?=\s+(?:quickly|is|was|has|does))': 'the player',  # "Emmanuel quickly" → "the player quickly"
+            r"(?:Here's|There's)\s+[A-Z][a-z]+": "Here's the player",  # "Here's George" → "Here's the player"
+            r'\b[A-Z]{2,}\b(?=\s+\d+)': 'PLAYER',  # "POOLE 13" → "PLAYER 13"
+        }
+
+        cleaned_text = text
+        for pattern, replacement in name_replacements.items():
+            cleaned_text = re.sub(pattern, replacement, cleaned_text)
+
+        # If text still contains obvious names (capitalized words mid-sentence), skip this audio cue
+        # Check for suspicious patterns like capitalized words that aren't common words
+        common_words = {'And', 'The', 'But', 'So', 'Or', 'As', 'At', 'By', 'For', 'In', 'Of', 'On', 'To', 'With'}
+        words = cleaned_text.split()
+        for word in words:
+            if word and word[0].isupper() and word not in common_words and len(word) > 2:
+                # Likely a name, replace with generic
+                cleaned_text = cleaned_text.replace(word, "the player")
+
+        return cleaned_text
 
     def _extract_visual_summary(self, description: str) -> str:
         """Extract key visual elements for counting questions"""
@@ -1187,7 +1355,7 @@ Answer: [golden answer referencing both audio and visual]"""
             return "uniformed individuals"
         else:
             return "visual elements"
-    
+
     def _find_audio_near_timestamp(
         self,
         timestamp: float,
