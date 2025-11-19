@@ -1,0 +1,1422 @@
+"""
+Main Pipeline Orchestrator - Complete Video Q&A Adversarial Generation System with Human Review Gates
+
+ARCHITECTURE:
+- Stage 0: Generate 30 questions → PAUSE for Stage 1 review
+- Stage 1: (After all approved) Validate + Test with Gemini → PAUSE for Stage 2 selection
+- Stage 2: (After 4 selected) Export to Excel → Complete
+
+BUSINESS MODEL:
+- Revenue: $8 per video
+- Target Cost: $3.36 per video
+- Target Margin: 58% ($4.64 profit)
+- Target Output: 99.9% hallucination-free
+- Deliverable: Professional Excel with Top 4 Q&A pairs
+
+STATE MANAGEMENT:
+- Pipeline pauses at review gates
+- Resumes via API calls
+- WebSocket notifications keep frontend updated
+- Database tracks all state transitions
+"""
+
+from typing import List, Dict, Optional, Tuple, Any
+import logging
+from pathlib import Path
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import asyncio
+import json
+import time
+import os
+
+# Block 2: Database Layer
+from database.operations import VideoOperations, QuestionOperations, ReviewOperations
+
+# Block 4: Evidence extraction
+from processing.evidence_extractor import EvidenceExtractor
+from processing.cost_optimizer import CostOptimizer
+
+# Block 3: Question generation & validation
+from generation.tier1_deterministic import Tier1Generator
+from generation.tier2_llama_api import Tier2LlamaGenerator
+from generation.tier3_creative import Tier3Generator
+from templates.base import EvidenceDatabase
+from validation import ValidationOrchestrator
+
+# Block 5: Gemini testing
+from gemini import GeminiClient, AdversarialTester, HallucinationDetector
+
+# Block 6: Selection logic
+from selection import QuestionSelector, SelectionConfig, DifficultyRanker, DiversityScorer
+
+# Block 7: Feedback & export
+from feedback import FeedbackProcessor, PatternLearner, FeedbackConfig
+from feedback.export_manager import ExcelExporter
+
+# WebSocket manager for real-time updates (optional for standalone execution)
+try:
+    from backend.api.websockets.manager import manager as ws_manager
+except ImportError:
+    # Create a mock manager for standalone execution
+    class MockWebSocketManager:
+        async def notify_stage1_ready(self, *args, **kwargs):
+            pass
+        async def notify_stage2_ready(self, *args, **kwargs):
+            pass
+        async def notify_pipeline_complete(self, *args, **kwargs):
+            pass
+        async def notify_error(self, *args, **kwargs):
+            pass
+        async def notify_validation_progress(self, *args, **kwargs):
+            pass
+        async def notify_gemini_testing_progress(self, *args, **kwargs):
+            pass
+    ws_manager = MockWebSocketManager()
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('pipeline.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PipelineConfig:
+    """Complete pipeline configuration"""
+
+    # Video processing
+    video_path: str
+    video_id: Optional[str] = None
+    video_url: Optional[str] = None          # Optional video URL (for batch uploads)
+
+    # API Keys
+    google_ai_api_key: Optional[str] = None  # For Gemini testing
+    openai_api_key: Optional[str] = None     # For Tier 2 & 3 generation
+
+    # Generation targets
+    target_question_count: int = 30          # Total questions to generate
+    tier1_template_count: int = 25           # Deterministic templates
+    tier2_constrained_count: int = 3         # Constrained LLM
+    tier3_creative_count: int = 2            # Creative LLM
+
+    # Quality thresholds
+    min_validation_pass_rate: float = 0.90   # 90% validation pass rate
+    min_gemini_fail_rate: float = 0.30       # 30%+ Gemini failures
+    target_hallucination_rate: float = 0.001 # 0.1% hallucination (99.9% clean)
+
+    # Cost constraints
+    max_cost_per_video: float = 3.36         # Maximum $3.36 per video
+    target_profit_margin: float = 0.58       # 58% profit margin
+
+    # Selection configuration
+    top_k_selection: int = 4                 # Select top 4 questions
+    selection_difficulty_weight: float = 0.5
+    selection_diversity_weight: float = 0.3
+    selection_failure_weight: float = 0.2
+
+    # Processing options
+    enable_gemini_testing: bool = True       # Test against Gemini
+    enable_hallucination_detection: bool = True
+    enable_pattern_learning: bool = True     # Learn from feedback
+    enable_excel_export: bool = True         # Export to Excel
+    enable_websocket: bool = False           # Enable WebSocket notifications
+
+    # Output paths
+    output_dir: Path = Path("./outputs")
+    logs_dir: Path = Path("./logs")
+    cache_dir: Path = Path("./cache")
+
+    # Performance
+    use_caching: bool = True                 # Cache evidence extraction
+    parallel_processing: bool = False        # Parallel question generation
+
+    # Validation control
+    skip_video_validation: bool = False      # Skip video file existence check (for API uploads)
+
+    def __post_init__(self):
+        """Validate and create directories"""
+        # Create directories
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # Validate video exists (unless skip_video_validation is True)
+        if not self.skip_video_validation and not Path(self.video_path).exists():
+            raise FileNotFoundError(
+                f"Video not found: {self.video_path}\n"
+                f"If using the web UI, please upload a video file first.\n"
+                f"Visit http://localhost:5173/upload/video to upload a video."
+            )
+
+        # Set video_id if not provided
+        if not self.video_id:
+            self.video_id = Path(self.video_path).stem
+
+        # Validate API keys if features enabled
+        if self.enable_gemini_testing and not self.google_ai_api_key:
+            logger.warning("Gemini testing enabled but no API key provided - will be skipped")
+            self.enable_gemini_testing = False
+
+
+@dataclass
+class PipelineResult:
+    """Complete pipeline execution result"""
+    
+    video_id: str
+    pipeline_stage: str
+    success: bool = False
+    
+    # Generation results
+    questions_generated: int = 0
+    generated_questions: List[Dict[str, Any]] = field(default_factory=list)
+    
+    # Stage 1 Review
+    awaiting_stage1_review: bool = False
+    stage1_approved: int = 0
+    stage1_rejected: int = 0
+    stage1_pending: int = 0
+    
+    # Validation & Testing
+    questions_validated: int = 0
+    validated_questions: List[Dict[str, Any]] = field(default_factory=list)
+    validation_pass_rate: float = 0.0
+    validation_failures: int = 0
+    
+    questions_tested: int = 0
+    gemini_test_results: List[Dict[str, Any]] = field(default_factory=list)
+    gemini_fail_rate: float = 0.0
+    
+    # Stage 2 Selection
+    awaiting_stage2_selection: bool = False
+    failures_found: int = 0
+    final_selected: int = 0
+    selected_questions: List[Dict[str, Any]] = field(default_factory=list)
+    
+    # Hallucination detection results
+    hallucination_results: List[Dict[str, Any]] = field(default_factory=list)
+    hallucination_rate: float = 0.0
+    critical_hallucinations: int = 0
+    major_hallucinations: int = 0
+    minor_hallucinations: int = 0
+    
+    # Selection metrics
+    selection_metrics: Optional[Dict[str, Any]] = None
+    
+    # Feedback & learning
+    feedback_result: Optional[Dict[str, Any]] = None
+    learning_insights: Optional[Dict[str, Any]] = None
+    
+    # Output
+    excel_path: Optional[Path] = None
+    json_output_path: Optional[Path] = None
+    
+    # Cost & timing
+    total_cost: float = 0.0
+    cost_breakdown: Dict[str, float] = field(default_factory=dict)
+    profit_margin: float = 0.0
+    total_time_seconds: float = 0.0
+    stage_timings: Dict[str, float] = field(default_factory=dict)
+    
+    # Success indicators
+    meets_quality_targets: bool = False
+    meets_cost_target: bool = False
+    error_message: Optional[str] = None
+    
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON export"""
+        return {
+            'video_id': self.video_id,
+            'pipeline_stage': self.pipeline_stage,
+            'timestamp': self.timestamp,
+            'generation': {
+                'total_generated': self.questions_generated,
+                'validated': self.questions_validated,
+                'validation_pass_rate': round(self.validation_pass_rate, 3),
+                'validation_failures': self.validation_failures
+            },
+            'stage1_review': {
+                'awaiting': self.awaiting_stage1_review,
+                'approved': self.stage1_approved,
+                'rejected': self.stage1_rejected,
+                'pending': self.stage1_pending
+            },
+            'gemini_testing': {
+                'tested': self.questions_tested,
+                'fail_rate': round(self.gemini_fail_rate, 3),
+                'failures_found': self.failures_found
+            },
+            'stage2_selection': {
+                'awaiting': self.awaiting_stage2_selection,
+                'final_selected': self.final_selected
+            },
+            'hallucination_detection': {
+                'total_checked': len(self.hallucination_results),
+                'hallucination_rate': round(self.hallucination_rate, 4),
+                'critical': self.critical_hallucinations,
+                'major': self.major_hallucinations,
+                'minor': self.minor_hallucinations
+            },
+            'selection': {
+                'top_k': len(self.selected_questions),
+                'metrics': self.selection_metrics
+            },
+            'cost': {
+                'total': round(self.total_cost, 2),
+                'breakdown': {k: round(v, 2) for k, v in self.cost_breakdown.items()},
+                'profit_margin': round(self.profit_margin, 3)
+            },
+            'performance': {
+                'total_time_seconds': round(self.total_time_seconds, 1),
+                'stage_timings': {k: round(v, 1) for k, v in self.stage_timings.items()}
+            },
+            'quality_targets': {
+                'meets_quality_targets': self.meets_quality_targets,
+                'meets_cost_target': self.meets_cost_target,
+                'validation_target': self.validation_pass_rate >= 0.90,
+                'gemini_fail_target': self.gemini_fail_rate >= 0.30,
+                'hallucination_target': self.hallucination_rate <= 0.001
+            },
+            'outputs': {
+                'excel': str(self.excel_path) if self.excel_path else None,
+                'json': str(self.json_output_path) if self.json_output_path else None
+            },
+            'success': self.success,
+            'error_message': self.error_message
+        }
+
+
+class QuestionGenerationPipeline:
+    """
+    Main pipeline with human review integration
+    
+    ARCHITECTURE:
+    - run() -> Generates 30 questions, then PAUSES
+    - continue_after_stage1_approval() -> Validates & tests, then PAUSES
+    - finalize_after_stage2_selection() -> Exports & completes
+    """
+    
+    def __init__(self, config: PipelineConfig):
+        self.config = config
+        self.start_time = None
+        
+        logger.info("="*80)
+        logger.info("INITIALIZING QUESTION GENERATION PIPELINE")
+        logger.info("="*80)
+        
+        # Initialize Block 4: Evidence extraction
+        self.evidence_extractor = EvidenceExtractor(
+            video_path=config.video_path,
+            video_id=config.video_id)
+        self.cost_optimizer = CostOptimizer(strict_mode=False)
+        
+        # Initialize Block 3: Question generators
+        self.tier1_gen = Tier1Generator(openai_api_key=config.openai_api_key)
+        self.tier2_gen = Tier2LlamaGenerator(api_key=config.openai_api_key) if config.openai_api_key else None
+        self.tier3_gen = Tier3Generator(api_key=config.openai_api_key) if config.openai_api_key else None
+        
+        # Initialize validation
+        self.validation_orchestrator = ValidationOrchestrator()
+        
+        # Initialize Block 5: Gemini testing (if enabled)
+        self.gemini_client = None
+        self.adversarial_tester = None
+        self.hallucination_detector = None
+        
+        if config.enable_gemini_testing and config.google_ai_api_key:
+            self.gemini_client = GeminiClient(api_key=config.google_ai_api_key)
+            self.adversarial_tester = AdversarialTester(client=self.gemini_client)
+            if config.enable_hallucination_detection:
+                self.hallucination_detector = HallucinationDetector()
+            logger.info("✓ Gemini testing enabled")
+        else:
+            logger.info("✗ Gemini testing disabled")
+        
+        # Initialize Block 6: Selection logic
+        selection_config = SelectionConfig(
+            top_k=config.top_k_selection,
+            difficulty_weight=config.selection_difficulty_weight,
+            diversity_weight=config.selection_diversity_weight,
+            failure_weight=config.selection_failure_weight
+        )
+        self.question_selector = QuestionSelector(config=selection_config)
+        self.difficulty_ranker = DifficultyRanker()
+        self.diversity_scorer = DiversityScorer()
+        logger.info("✓ Selection logic initialized")
+        
+        # Initialize Block 7: Feedback & export
+        feedback_config = FeedbackConfig(
+            min_pass_rate=config.min_validation_pass_rate,
+            min_gemini_fail_rate=config.min_gemini_fail_rate,
+            target_hallucination_rate=config.target_hallucination_rate
+        )
+        self.feedback_processor = FeedbackProcessor(config=feedback_config)
+        self.pattern_learner = PatternLearner()
+        self.excel_exporter = ExcelExporter()
+        logger.info("✓ Feedback & export initialized")
+        
+        logger.info("✓ Pipeline initialization complete")
+        self._print_configuration()
+    
+    async def run(self) -> PipelineResult:
+        """
+        STAGE 0: Generate 30 questions + Extract Evidence
+        
+        Returns immediately after generation.
+        Pipeline PAUSES for human review.
+        """
+        self.start_time = time.time()
+        
+        try:
+            # Get or create video record
+            video = VideoOperations.get_video(self.config.video_id)
+            if not video:
+                video = VideoOperations.create_video(
+                    video_id=self.config.video_id,
+                    video_url=self.config.video_path,
+                    video_name=Path(self.config.video_path).name
+                )
+            
+            # Update pipeline stage
+            VideoOperations.update_pipeline_stage(self.config.video_id, 'extracting_evidence')
+            
+            logger.info("="*80)
+            logger.info("STAGE 0: EVIDENCE EXTRACTION + QUESTION GENERATION")
+            logger.info("="*80)
+            
+            # Step 1: Extract evidence
+            stage_start = time.time()
+            evidence = await self._extract_evidence()
+            evidence_time = time.time() - stage_start
+            evidence_cost = self._get_stage_cost('evidence')
+
+            # Step 1.5: HITL Evidence Extraction & Review (if enabled)
+            evidence_review_result = await self._extract_and_review_evidence()
+            if evidence_review_result and evidence_review_result.get('status') == 'awaiting_review':
+                # Pipeline pauses here - human needs to review evidence
+                logger.info("⏸️  Pipeline PAUSED - Awaiting evidence review")
+                logger.info(f"   Review URL: {evidence_review_result.get('review_url')}")
+                VideoOperations.update_pipeline_stage(self.config.video_id, 'awaiting_evidence_review')
+
+                return PipelineResult(
+                    video_id=self.config.video_id,
+                    status='paused_evidence_review',
+                    questions_generated=0,
+                    questions_validated=0,
+                    questions_tested=0,
+                    failures_found=0,
+                    selected_questions=[],
+                    total_cost=evidence_cost,
+                    processing_time=time.time() - self.start_time,
+                    evidence_review_pending=evidence_review_result.get('pending', 0)
+                )
+
+            # Update pipeline stage
+            VideoOperations.update_pipeline_stage(self.config.video_id, 'generating')
+
+            # Step 2: Generate questions from all 3 tiers
+            logger.info(f"\nGenerating {self.config.target_question_count} questions:")
+            logger.info(f"  Tier 1 (Templates):     {self.config.tier1_template_count}")
+            logger.info(f"  Tier 2 (Constrained):   {self.config.tier2_constrained_count}")
+            logger.info(f"  Tier 3 (Creative):      {self.config.tier3_creative_count}")
+            
+            all_questions = []
+            
+            # Tier 1: Templates
+            stage_start = time.time()
+            logger.info(f"\n➤ Generating Tier 1 (Templates): {self.config.tier1_template_count} questions")
+            tier1_questions = await self._generate_tier1(video, evidence)
+            all_questions.extend(tier1_questions)
+            tier1_time = time.time() - stage_start
+            
+            # Tier 2: Constrained
+            tier2_time = 0
+            if self.tier2_gen and self.config.tier2_constrained_count > 0:
+                stage_start = time.time()
+                logger.info(f"\n➤ Generating Tier 2 (Constrained): {self.config.tier2_constrained_count} questions")
+                tier2_questions = await self._generate_tier2(video, evidence)
+                all_questions.extend(tier2_questions)
+                tier2_time = time.time() - stage_start
+            
+            # Tier 3: Creative
+            tier3_time = 0
+            if self.tier3_gen and self.config.tier3_creative_count > 0:
+                stage_start = time.time()
+                logger.info(f"\n➤ Generating Tier 3 (Creative): {self.config.tier3_creative_count} questions")
+                tier3_questions = await self._generate_tier3(video, evidence)
+                all_questions.extend(tier3_questions)
+                tier3_time = time.time() - stage_start
+            
+            generation_cost = self._get_stage_cost('generation')
+            
+            # Save all questions to database
+            logger.info(f"\n➤ Saving {len(all_questions)} questions to database...")
+            for q in all_questions:
+                QuestionOperations.create_question(
+                    question_id=q['question_id'],
+                    video_id=video.id,
+                    question_text=q['question_text'],
+                    golden_answer=q['golden_answer'],
+                    generation_tier=q['generation_tier'],
+                    task_type=q.get('task_type'),
+                    template_name=q.get('template_name'),
+                    start_seconds=q.get('start_seconds'),
+                    end_seconds=q.get('end_seconds'),
+                    audio_cues=q.get('audio_cues'),
+                    visual_cues=q.get('visual_cues'),
+                    evidence_refs=q.get('evidence_refs'),
+                    confidence_score=q.get('confidence_score')
+                )
+            
+            # Update video
+            VideoOperations.update_video(
+                self.config.video_id,
+                pipeline_stage='awaiting_stage1_review',
+                stage1_total_questions=len(all_questions),
+                candidates_generated=len(all_questions)
+            )
+            
+            # Send WebSocket notification
+            await ws_manager.notify_stage1_ready(
+                self.config.video_id,
+                len(all_questions)
+            )
+            
+            elapsed = time.time() - self.start_time
+            
+            logger.info("\n" + "="*80)
+            logger.info("⭐ PIPELINE PAUSED: Awaiting Stage 1 Human Review")
+            logger.info(f"   {len(all_questions)} questions ready for review")
+            logger.info(f"   Time: {elapsed:.1f}s (Evidence: {evidence_time:.1f}s, Gen: {tier1_time + tier2_time + tier3_time:.1f}s)")
+            logger.info("="*80 + "\n")
+            
+            return PipelineResult(
+                video_id=self.config.video_id,
+                pipeline_stage='awaiting_stage1_review',
+                success=True,
+                questions_generated=len(all_questions),
+                generated_questions=all_questions,
+                awaiting_stage1_review=True,
+                stage1_pending=len(all_questions),
+                total_time_seconds=elapsed,
+                stage_timings={
+                    'evidence_extraction': evidence_time,
+                    'tier1_generation': tier1_time,
+                    'tier2_generation': tier2_time,
+                    'tier3_generation': tier3_time
+                },
+                cost_breakdown={
+                    'evidence_extraction': evidence_cost,
+                    'question_generation': generation_cost
+                },
+                total_cost=evidence_cost + generation_cost
+            )
+            
+        except Exception as e:
+            logger.error(f"Error in pipeline generation: {e}", exc_info=True)
+            
+            VideoOperations.update_video(
+                self.config.video_id,
+                pipeline_stage='failed',
+                error_message=str(e)
+            )
+            
+            await ws_manager.notify_error(self.config.video_id, str(e), 'generation')
+            
+            return PipelineResult(
+                video_id=self.config.video_id,
+                pipeline_stage='failed',
+                success=False,
+                error_message=str(e)
+            )
+    
+    async def continue_after_stage1_approval(self, video_id: str) -> PipelineResult:
+        """
+        STAGE 1: Validate & Test with Gemini
+        
+        Called by API after all questions approved.
+        Runs 10-layer validation and Gemini adversarial testing.
+        Pipeline PAUSES again for Stage 2 selection.
+        """
+        stage_start_time = time.time()
+        
+        try:
+            video = VideoOperations.get_video(video_id)
+            if not video:
+                raise ValueError(f"Video {video_id} not found")
+            
+            # Verify Stage 1 is complete
+            if not ReviewOperations.is_stage1_complete(video.id):
+                raise ValueError("Stage 1 review not complete")
+            
+            logger.info("="*80)
+            logger.info("STAGE 1: VALIDATION & GEMINI TESTING")
+            logger.info("="*80)
+            
+            # Update pipeline stage
+            VideoOperations.update_pipeline_stage(video_id, 'validating')
+            
+            # Get approved questions
+            approved_questions = ReviewOperations.get_approved_questions(video.id)
+            logger.info(f"\n➤ Processing {len(approved_questions)} approved questions")
+            
+            # Get evidence for validation
+            evidence = await self._load_cached_evidence(video_id)
+            
+            # Step 1: Validate all questions (10 layers)
+            validation_start = time.time()
+            logger.info(f"\n➤ Running 10-layer validation...")
+            validated = await self._validate_questions(approved_questions, evidence, video_id)
+            validation_time = time.time() - validation_start
+            
+            validation_pass_rate = len(validated) / len(approved_questions) if approved_questions else 0
+            logger.info(f"✓ Validation complete: {len(validated)}/{len(approved_questions)} passed ({validation_pass_rate:.1%})")
+            
+            # Update pipeline stage
+            VideoOperations.update_pipeline_stage(video_id, 'testing_gemini')
+            
+            # Step 2: Test with Gemini
+            gemini_start = time.time()
+            logger.info(f"\n➤ Testing with Gemini...")
+            tested, hall_results = await self._test_with_gemini(validated, video_id)
+            gemini_time = time.time() - gemini_start
+            gemini_cost = self._get_stage_cost('gemini')
+            
+            # Count failures
+            failures = [q for q in tested if q.get('gemini_failed')]
+            fail_rate = len(failures) / len(tested) if tested else 0
+            
+            # Calculate hallucination stats
+            hall_rate, critical, major, minor = self._calculate_hallucination_stats(hall_results)
+            
+            logger.info(f"✓ Gemini testing complete:")
+            logger.info(f"  Fail Rate: {fail_rate:.1%} ({len(failures)}/{len(tested)})")
+            logger.info(f"  Hallucination Rate: {hall_rate:.2%}")
+            logger.info(f"  Critical: {critical}, Major: {major}, Minor: {minor}")
+            
+            # Update video
+            VideoOperations.update_video(
+                video_id,
+                pipeline_stage='awaiting_stage2_selection',
+                candidates_validated=len(validated),
+                questions_tested=len(tested),
+                failures_found=len(failures),
+                stage2_failures_count=len(failures)
+            )
+            
+            # Send WebSocket notification
+            await ws_manager.notify_stage2_ready(video_id, len(failures))
+            
+            elapsed = time.time() - stage_start_time
+            
+            logger.info("\n" + "="*80)
+            logger.info("⭐ PIPELINE PAUSED: Awaiting Stage 2 Manual Selection")
+            logger.info(f"   {len(failures)} Gemini failures ready for selection")
+            logger.info(f"   Time: {elapsed:.1f}s (Validation: {validation_time:.1f}s, Gemini: {gemini_time:.1f}s)")
+            logger.info("="*80 + "\n")
+            
+            return PipelineResult(
+                video_id=video_id,
+                pipeline_stage='awaiting_stage2_selection',
+                success=True,
+                questions_validated=len(validated),
+                validated_questions=validated,
+                validation_pass_rate=validation_pass_rate,
+                validation_failures=len(approved_questions) - len(validated),
+                questions_tested=len(tested),
+                gemini_test_results=tested,
+                gemini_fail_rate=fail_rate,
+                awaiting_stage2_selection=True,
+                failures_found=len(failures),
+                hallucination_results=hall_results,
+                hallucination_rate=hall_rate,
+                critical_hallucinations=critical,
+                major_hallucinations=major,
+                minor_hallucinations=minor,
+                total_time_seconds=elapsed,
+                stage_timings={
+                    'validation': validation_time,
+                    'gemini_testing': gemini_time
+                },
+                cost_breakdown={
+                    'gemini_testing': gemini_cost
+                },
+                total_cost=gemini_cost
+            )
+            
+        except Exception as e:
+            logger.error(f"Error in validation/testing: {e}", exc_info=True)
+            
+            VideoOperations.update_video(
+                video_id,
+                pipeline_stage='failed',
+                error_message=str(e)
+            )
+            
+            await ws_manager.notify_error(video_id, str(e), 'validation')
+            
+            return PipelineResult(
+                video_id=video_id,
+                pipeline_stage='failed',
+                success=False,
+                error_message=str(e)
+            )
+    
+    async def finalize_after_stage2_selection(self, video_id: str) -> PipelineResult:
+        """
+        STAGE 2: Export Selected Questions + Feedback Learning
+        
+        Called by API after human selects final 4.
+        Processes feedback, learns patterns, exports to Excel, and marks pipeline complete.
+        """
+        stage_start_time = time.time()
+        
+        try:
+            video = VideoOperations.get_video(video_id)
+            if not video:
+                raise ValueError(f"Video {video_id} not found")
+            
+            # Get selected questions
+            selected = ReviewOperations.get_stage2_selected(video.id)
+            
+            if len(selected) != 4:
+                raise ValueError(f"Expected 4 selected questions, got {len(selected)}")
+            
+            logger.info("="*80)
+            logger.info("STAGE 2: SELECTION FINALIZATION + EXPORT")
+            logger.info("="*80)
+            
+            # Get all questions for feedback processing
+            all_questions = QuestionOperations.get_all_questions(video.id)
+            validated_questions = [q for q in all_questions if q.validation_status == 'passed']
+            test_results = [q.gemini_test_result for q in validated_questions if q.gemini_test_result]
+            
+            # Step 1: Process feedback
+            feedback_start = time.time()
+            logger.info(f"\n➤ Processing feedback...")
+            feedback = await self._process_feedback(
+                all_questions,
+                validated_questions,
+                test_results,
+                selected
+            )
+            feedback_time = time.time() - feedback_start
+            
+            # Step 2: Learn patterns (if enabled)
+            learning_time = 0
+            insights = None
+            if self.config.enable_pattern_learning:
+                learning_start = time.time()
+                logger.info(f"\n➤ Learning patterns...")
+                insights = await self._learn_patterns(feedback, selected)
+                learning_time = time.time() - learning_start
+                logger.info(f"✓ Pattern learning complete: {insights.get('total_patterns_detected', 0)} patterns detected")
+            
+            # Step 3: Calculate selection metrics
+            logger.info(f"\n➤ Calculating selection metrics...")
+            selection_metrics = self._calculate_selection_metrics(selected, test_results)
+            
+            # Step 4: Export to Excel
+            export_start = time.time()
+            logger.info(f"\n➤ Exporting to Excel...")
+            excel_path = await self._export_to_excel(
+                video_id,
+                selected,
+                all_questions,
+                feedback,
+                insights
+            )
+            export_time = time.time() - export_start
+            logger.info(f"✓ Excel exported: {excel_path}")
+            
+            # Step 5: Export JSON results
+            result = PipelineResult(
+                video_id=video_id,
+                pipeline_stage='completed',
+                success=True,
+                final_selected=len(selected),
+                selected_questions=selected,
+                selection_metrics=selection_metrics,
+                feedback_result=feedback,
+                learning_insights=insights,
+                excel_path=excel_path,
+                stage_timings={
+                    'feedback_processing': feedback_time,
+                    'pattern_learning': learning_time,
+                    'excel_export': export_time
+                }
+            )
+            
+            json_path = await self._export_json(result)
+            result.json_output_path = json_path
+            
+            # Update video
+            VideoOperations.update_video(
+                video_id,
+                pipeline_stage='completed',
+                status='completed',
+                completed_at=datetime.now(timezone.utc),
+                final_selected=len(selected)
+            )
+            
+            # Send WebSocket notification
+            await ws_manager.notify_pipeline_complete(video_id, str(excel_path))
+            
+            elapsed = time.time() - stage_start_time
+            result.total_time_seconds = elapsed
+            
+            logger.info("\n" + "="*80)
+            logger.info("🎉 PIPELINE COMPLETE!")
+            logger.info(f"   Excel: {excel_path}")
+            logger.info(f"   JSON: {json_path}")
+            logger.info(f"   Time: {elapsed:.1f}s")
+            logger.info("="*80 + "\n")
+            
+            self._print_final_summary(result)
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error in finalization: {e}", exc_info=True)
+            
+            VideoOperations.update_video(
+                video_id,
+                pipeline_stage='failed',
+                error_message=str(e)
+            )
+            
+            await ws_manager.notify_error(video_id, str(e), 'export')
+            
+            return PipelineResult(
+                video_id=video_id,
+                pipeline_stage='failed',
+                success=False,
+                error_message=str(e)
+            )
+    
+    # ========== HELPER METHODS ==========
+    
+    async def _extract_evidence(self) -> Dict[str, Any]:
+        """Extract evidence from video (with caching)"""
+        cache_key = f"{self.config.video_id}_evidence"
+        cache_path = self.config.cache_dir / f"{cache_key}.json"
+        
+        if self.config.use_caching and cache_path.exists():
+            logger.info("✓ Loading evidence from cache")
+            with open(cache_path, 'r') as f:
+                return json.load(f)
+        
+        logger.info(f"Extracting evidence from: {self.config.video_path}")
+        # Evidence extractor uses JIT (just-in-time) - returns minimal structure
+        evidence = {
+             'video_id': self.config.video_id,
+             'duration': 0.0,  # Will be extracted JIT
+             'transcript_segments': [],
+             'music_segments': [],
+             'sound_effects': [],
+             'ambient_sounds': [],
+             'tone_changes': [],
+             'person_detections': [],
+             'object_detections': [],
+             'scene_detections': [],
+             'ocr_detections': [],
+              'action_detections': [],
+              'scene_changes': [],
+               'event_timeline': [],
+               'character_names': [],
+                'team_names': [],
+                'media_names': [],
+                 'brand_names': []
+            }
+        logger.info("✓ Using JIT evidence extraction (evidence extracted on-demand)")
+        # Cache for future use
+        if self.config.use_caching:
+            with open(cache_path, 'w') as f:
+                json.dump(evidence, f, indent=2)
+            logger.info(f"✓ Evidence cached to: {cache_path}")
+        
+        return evidence
+    
+    async def _load_cached_evidence(self, video_id: str) -> Dict[str, Any]:
+        """Load cached evidence for validation"""
+        cache_path = self.config.cache_dir / f"{video_id}_evidence.json"
+
+        if cache_path.exists():
+            with open(cache_path, 'r') as f:
+                return json.load(f)
+
+        # Fallback: extract fresh
+        return await self._extract_evidence()
+
+    async def _extract_and_review_evidence(self) -> Optional[Dict[str, Any]]:
+        """
+        Extract evidence for HITL review
+
+        Calls the evidence extractor's HITL method to sample video,
+        run AI consensus, and create evidence items for human review.
+
+        Returns:
+            Result dict with status and review info, or None if disabled
+        """
+        from processing.evidence_extractor import EvidenceExtractor
+        from pipeline.evidence_review_stage import EvidenceReviewStage
+        from database.operations import VideoOperations
+
+        try:
+            logger.info("=" * 80)
+            logger.info("EVIDENCE EXTRACTION & REVIEW (HITL)")
+            logger.info("=" * 80)
+            logger.info(f"Video ID: {self.config.video_id}")
+            logger.info(f"Video Path: {self.config.video_path}")
+
+            # Convert string path to Path object if needed
+            from pathlib import Path
+            video_path = Path(self.config.video_path) if isinstance(self.config.video_path, str) else self.config.video_path
+            logger.info(f"Video Path Exists: {video_path.exists()}")
+
+            # STEP 1: Extract evidence items using all 10 AI models
+            logger.info("=" * 80)
+            logger.info("STEP 1: EVIDENCE EXTRACTION")
+            logger.info("=" * 80)
+            logger.info("Initializing evidence extractor with 10 AI models...")
+            logger.info("Models: YOLOv8x, CLIP, Places365, PaddleOCR, VideoMAE,")
+            logger.info("        BLIP-2, Whisper, DeepSport, FER+, Auto-Orient")
+
+            # Update status to extracting
+            logger.info("Updating video status to 'extracting'...")
+            VideoOperations.update_video(
+                self.config.video_id,
+                evidence_extraction_status='extracting'
+            )
+            logger.info("✓ Status updated to 'extracting'")
+
+            # Initialize evidence extractor
+            logger.info("Creating EvidenceExtractor instance...")
+            extractor = EvidenceExtractor(
+                video_path=video_path,  # Use Path object
+                video_id=self.config.video_id
+            )
+            logger.info("✓ EvidenceExtractor initialized")
+
+            # Extract evidence items (runs all 10 models)
+            logger.info("=" * 80)
+            logger.info("Running extract_evidence_for_hitl()...")
+            logger.info("  - Sampling interval: 5.0 seconds")
+            logger.info("  - Max items: 50")
+            logger.info("  - This will run all 10 AI models on video frames")
+            logger.info("=" * 80)
+
+            evidence_items = extractor.extract_evidence_for_hitl(
+                video_path=video_path,  # Use Path object
+                interval_seconds=5.0,  # Sample every 5 seconds
+                max_items=50  # Limit to 50 items for review
+            )
+
+            logger.info("=" * 80)
+            logger.info(f"✓ Evidence extraction complete!")
+            logger.info(f"✓ Extracted {len(evidence_items)} evidence items")
+            logger.info(f"✓ Items type: {type(evidence_items)}")
+            if evidence_items:
+                logger.info(f"✓ First item type: {type(evidence_items[0])}")
+                logger.info(f"✓ First item: {evidence_items[0]}")
+            logger.info("=" * 80)
+
+            # Update status to awaiting review
+            logger.info("Updating video status to 'ai_complete'...")
+            VideoOperations.update_video(
+                self.config.video_id,
+                evidence_extraction_status='ai_complete',
+                ai_evidence_count=len(evidence_items)
+            )
+            logger.info(f"✓ Status updated: ai_complete, {len(evidence_items)} items")
+
+            # STEP 2: Wait for human review
+            logger.info("=" * 80)
+            logger.info("STEP 2: HUMAN REVIEW")
+            logger.info("=" * 80)
+            logger.info("Initializing evidence review stage...")
+
+            # Initialize evidence review stage
+            review_stage = EvidenceReviewStage()
+            logger.info("✓ EvidenceReviewStage initialized")
+
+            # Check if should run
+            logger.info("Checking if review stage should run...")
+            should_run = review_stage.should_run(self.config.video_id)
+            logger.info(f"Should run: {should_run}")
+
+            if not should_run:
+                logger.info("Evidence review not needed - skipping")
+                return None
+
+            # Run evidence review stage (waits for human review)
+            logger.info("Running evidence review stage...")
+            result = review_stage.run(self.config.video_id)
+
+            logger.info("=" * 80)
+            logger.info(f"Evidence review status: {result.get('status')}")
+            logger.info(f"Evidence review result: {result}")
+            logger.info("=" * 80)
+
+            return result
+
+        except Exception as e:
+            logger.error("=" * 80)
+            logger.error("EVIDENCE EXTRACTION/REVIEW FAILED")
+            logger.error("=" * 80)
+            logger.error(f"Error type: {type(e).__name__}")
+            logger.error(f"Error message: {str(e)}")
+            logger.error("Full traceback:", exc_info=True)
+            logger.error("=" * 80)
+
+            # Update video status to failed
+            try:
+                logger.info("Updating video status to 'failed'...")
+                VideoOperations.update_video(
+                    self.config.video_id,
+                    evidence_extraction_status='failed',
+                    error_message=str(e)
+                )
+                logger.info("✓ Video status updated to 'failed'")
+            except Exception as update_error:
+                logger.error(f"Failed to update video status: {update_error}")
+
+            # Don't block pipeline on HITL errors
+            logger.info("Returning None (not blocking pipeline)")
+            return None
+
+    async def _generate_tier1(self, video, evidence) -> List[Dict]:
+        """Generate Tier 1 template questions"""
+        # Convert evidence dict to EvidenceDatabase
+        evidence_db = self._convert_to_evidence_db(evidence, video)
+        
+        # Generate questions
+        questions = self.tier1_gen.generate(
+            evidence=evidence_db,
+            target_count=self.config.tier1_template_count
+        )
+        
+        # Convert to dict format
+        return [
+            {
+                'question_id': f"q_t1_{i}_{video.video_id}",
+                'question_text': q.question_text,
+                'golden_answer': q.golden_answer,
+                'generation_tier': 'template',
+                'task_type': q.question_types[0].value if q.question_types else None,
+                'template_name': q.template_name,
+                'start_seconds': q.start_timestamp,
+                'end_seconds': q.end_timestamp,
+                'audio_cues': [c.to_dict() for c in q.audio_cues] if hasattr(q, 'audio_cues') else [],
+                'visual_cues': [c.to_dict() for c in q.visual_cues] if hasattr(q, 'visual_cues') else [],
+                'evidence_refs': q.evidence_refs,
+                'confidence_score': q.complexity_score
+            }
+            for i, q in enumerate(questions, 1)
+        ]
+    
+    async def _generate_tier2(self, video, evidence) -> List[Dict]:
+        """Generate Tier 2 constrained questions"""
+        evidence_db = self._convert_to_evidence_db(evidence, video)
+        
+        questions = self.tier2_gen.generate(
+            evidence=evidence_db,
+            target_count=self.config.tier2_constrained_count
+        )
+        
+        return [
+            {
+                'question_id': f"q_t2_{i}_{video.video_id}",
+                'question_text': q.question_text,
+                'golden_answer': q.golden_answer,
+                'generation_tier': 'llama',
+                'task_type': q.question_types[0].value if hasattr(q, 'question_types') and q.question_types else None,
+                'template_name': getattr(q, 'template_name', None),
+                'start_seconds': getattr(q, 'start_timestamp', None),
+                'end_seconds': getattr(q, 'end_timestamp', None),
+                'audio_cues': getattr(q, 'audio_cues', []),
+                'visual_cues': getattr(q, 'visual_cues', []),
+                'evidence_refs': getattr(q, 'evidence_refs', []),
+                'confidence_score': getattr(q, 'complexity_score', 0.5)
+            }
+            for i, q in enumerate(questions, 1)
+        ]
+    
+    async def _generate_tier3(self, video, evidence) -> List[Dict]:
+        """Generate Tier 3 creative questions"""
+        evidence_db = self._convert_to_evidence_db(evidence, video)
+        
+        questions = self.tier3_gen.generate(
+            evidence=evidence_db,
+            target_count=self.config.tier3_creative_count
+        )
+        
+        return [
+            {
+                'question_id': f"q_t3_{i}_{video.video_id}",
+                'question_text': q.question_text,
+                'golden_answer': q.golden_answer,
+                'generation_tier': 'gpt4mini',
+                'task_type': q.question_types[0].value if hasattr(q, 'question_types') and q.question_types else None,
+                'template_name': getattr(q, 'template_name', None),
+                'start_seconds': getattr(q, 'start_timestamp', None),
+                'end_seconds': getattr(q, 'end_timestamp', None),
+                'audio_cues': getattr(q, 'audio_cues', []),
+                'visual_cues': getattr(q, 'visual_cues', []),
+                'evidence_refs': getattr(q, 'evidence_refs', []),
+                'confidence_score': getattr(q, 'complexity_score', 0.5)
+            }
+            for i, q in enumerate(questions, 1)
+        ]
+    
+    def _convert_to_evidence_db(self, evidence: Dict[str, Any], video) -> EvidenceDatabase:
+        """Convert evidence dict to EvidenceDatabase object"""
+        return EvidenceDatabase(
+            video_id=video.video_id,
+            duration=evidence.get('duration', video.duration or 60.0),
+            transcript_segments=evidence.get('transcript_segments', []),
+            music_segments=evidence.get('music_segments', []),
+            sound_effects=evidence.get('sound_effects', []),
+            ambient_sounds=evidence.get('ambient_sounds', []),
+            tone_changes=evidence.get('tone_changes', []),
+            person_detections=evidence.get('person_detections', []),
+            object_detections=evidence.get('object_detections', []),
+            scene_detections=evidence.get('scene_detections', []),
+            ocr_detections=evidence.get('ocr_detections', []),
+            action_detections=evidence.get('action_detections', []),
+            scene_changes=evidence.get('scene_changes', []),
+            event_timeline=evidence.get('event_timeline', []),
+            character_names=evidence.get('character_names', []),
+            team_names=evidence.get('team_names', []),
+            media_names=evidence.get('media_names', []),
+            brand_names=evidence.get('brand_names', [])
+        )
+    
+    async def _validate_questions(
+        self,
+        questions: List,
+        evidence: Dict[str, Any],
+        video_id: str
+    ) -> List:
+        """Validate all approved questions with 10-layer validation"""
+        validated = []
+        
+        for i, q in enumerate(questions, 1):
+            # Send progress notification
+            await ws_manager.notify_validation_progress(video_id, i, len(questions))
+            
+            # Run 10-layer validation
+            result = self.validation_orchestrator.validate(
+                question={'question': q.question_text, 'answer': q.golden_answer},
+                evidence=evidence
+            )
+            
+            if result.get('is_valid', False):
+                validated.append(q)
+            else:
+                logger.debug(f"Question {i} rejected: {result.get('failed_layers', [])}")
+        
+        return validated
+    
+    async def _test_with_gemini(
+        self,
+        questions: List,
+        video_id: str
+    ) -> Tuple[List[Dict], List[Dict]]:
+        """Test questions with Gemini"""
+        tested = []
+        hall_results = []
+        
+        for i, q in enumerate(questions, 1):
+            # Send progress notification
+            await ws_manager.notify_gemini_testing_progress(video_id, i, len(questions))
+            
+            # Test with Gemini
+            test_result = self.adversarial_tester.test_single(
+                question=q.question_text,
+                golden_answer=q.golden_answer,
+                context={'video_id': video_id}
+            )
+            
+            # Check if Gemini failed
+            gemini_failed = test_result.status == 'failed'
+            
+            tested_dict = {
+                'question_id': q.id,
+                'question_text': q.question_text,
+                'golden_answer': q.golden_answer,
+                'gemini_answer': test_result.gemini_answer,
+                'gemini_failed': gemini_failed,
+                'status': test_result.status
+            }
+            tested.append(tested_dict)
+            
+            # Detect hallucinations
+            if self.hallucination_detector and gemini_failed:
+                hall_result = self.hallucination_detector.detect_hallucination(
+                    question=q.question_text,
+                    golden_answer=q.golden_answer,
+                    gemini_answer=test_result.gemini_answer
+                )
+                hall_results.append(hall_result.to_dict())
+        
+        return tested, hall_results
+    
+    async def _process_feedback(
+        self,
+        all_questions: List,
+        validated_questions: List,
+        test_results: List[Dict],
+        selected_questions: List
+    ) -> Dict[str, Any]:
+        """Process feedback from all stages"""
+        # Convert to validation results format
+        validation_results = [
+            {
+                'question_id': q.id,
+                'outcome': 'passed' if q in validated_questions else 'failed',
+                'passed': q in validated_questions
+            }
+            for q in all_questions
+        ]
+        
+        feedback_result = self.feedback_processor.process_feedback(
+            questions=[q.__dict__ for q in all_questions],
+            validation_results=validation_results,
+            test_results=test_results,
+            hallucination_results=[],
+            selection_results=[s.__dict__ for s in selected_questions]
+        )
+        
+        return feedback_result.to_dict()
+    
+    async def _learn_patterns(
+        self,
+        feedback: Dict[str, Any],
+        selected_questions: List
+    ) -> Dict[str, Any]:
+        """Learn patterns from feedback"""
+        insights = self.pattern_learner.learn_from_feedback(
+            feedback_results=[feedback],
+            selected_questions=[s.__dict__ for s in selected_questions]
+        )
+        
+        return insights.to_dict()
+    
+    def _calculate_selection_metrics(
+        self,
+        selected: List,
+        _test_results: List[Dict]
+    ) -> Dict[str, Any]:
+        """Calculate metrics for selected questions"""
+        # Calculate diversity
+        diversity_score = self.diversity_scorer.calculate_diversity(selected)
+        
+        # Calculate average difficulty
+        difficulties = [self.difficulty_ranker.rank(q) for q in selected]
+        avg_difficulty = sum(difficulties) / len(difficulties) if difficulties else 0
+        
+        # Get types covered
+        types_covered = list(set(q.task_type for q in selected if hasattr(q, 'task_type')))
+        
+        return {
+            'diversity_score': diversity_score,
+            'avg_difficulty': avg_difficulty,
+            'types_covered': types_covered,
+            'count': len(selected)
+        }
+    
+    async def _export_to_excel(
+        self,
+        video_id: str,
+        selected_questions: List,
+        _all_questions: List,
+        _feedback: Dict[str, Any],
+        _insights: Optional[Dict[str, Any]]
+    ) -> Path:
+        """Export to Excel"""
+        output_path = self.config.output_dir / f"{video_id}_deliverable.xlsx"
+        
+        await self.excel_exporter.export_selected_questions(
+            video_id,
+            selected_questions,
+            output_path=output_path
+        )
+        
+        return output_path
+    
+    async def _export_json(self, result: PipelineResult) -> Path:
+        """Export complete results to JSON"""
+        output_path = self.config.output_dir / f"{self.config.video_id}_results.json"
+        
+        with open(output_path, 'w') as f:
+            json.dump(result.to_dict(), f, indent=2)
+        
+        return output_path
+    
+    def _calculate_hallucination_stats(
+        self,
+        hall_results: List[Dict[str, Any]]
+    ) -> Tuple[float, int, int, int]:
+        """Calculate hallucination statistics"""
+        if not hall_results:
+            return 0.0, 0, 0, 0
+        
+        critical = sum(1 for h in hall_results if h.get('hallucination_type') == 'critical')
+        major = sum(1 for h in hall_results if h.get('hallucination_type') == 'major')
+        minor = sum(1 for h in hall_results if h.get('hallucination_type') == 'minor')
+        
+        total_hall = critical + major + minor
+        rate = total_hall / len(hall_results) if hall_results else 0
+        
+        return rate, critical, major, minor
+    
+    def _get_stage_cost(self, stage: str) -> float:
+        """Get cost for a specific stage"""
+        costs = {
+            'evidence': 2.40,      # Video processing
+            'generation': 0.45,    # Question generation
+            'gemini': 0.36,        # Gemini testing
+        }
+        return costs.get(stage, 0.0)
+    
+    def _print_configuration(self):
+        """Print pipeline configuration"""
+        print("\n" + "="*80)
+        print("⚙️  PIPELINE CONFIGURATION")
+        print("="*80)
+        
+        print(f"\n📹 VIDEO:")
+        print(f"  ID: {self.config.video_id}")
+        print(f"  Path: {self.config.video_path}")
+        
+        print(f"\n📊 GENERATION TARGETS:")
+        print(f"  Total Questions: {self.config.target_question_count}")
+        print(f"    Tier 1 (Templates):   {self.config.tier1_template_count}")
+        print(f"    Tier 2 (Constrained): {self.config.tier2_constrained_count}")
+        print(f"    Tier 3 (Creative):    {self.config.tier3_creative_count}")
+        
+        print(f"\n🎯 QUALITY TARGETS:")
+        print(f"  Validation Pass Rate: ≥{self.config.min_validation_pass_rate:.0%}")
+        print(f"  Gemini Fail Rate: ≥{self.config.min_gemini_fail_rate:.0%}")
+        print(f"  Hallucination Rate: ≤{self.config.target_hallucination_rate:.2%}")
+        
+        print(f"\n💰 COST TARGETS:")
+        print(f"  Max Cost: ${self.config.max_cost_per_video:.2f}")
+        print(f"  Revenue: $8.00")
+        print(f"  Target Margin: {self.config.target_profit_margin:.0%}")
+        print(f"  Target Profit: ${8.00 * self.config.target_profit_margin:.2f}")
+        
+        print(f"\n🔧 FEATURES:")
+        print(f"  Gemini Testing: {'✓' if self.config.enable_gemini_testing else '✗'}")
+        print(f"  Hallucination Detection: {'✓' if self.config.enable_hallucination_detection else '✗'}")
+        print(f"  Pattern Learning: {'✓' if self.config.enable_pattern_learning else '✗'}")
+        print(f"  Excel Export: {'✓' if self.config.enable_excel_export else '✗'}")
+        
+        print("="*80 + "\n")
+    
+    def _print_final_summary(self, result: PipelineResult):
+        """Print final execution summary"""
+        print("\n" + "="*80)
+        print("🎯 PIPELINE FINAL SUMMARY")
+        print("="*80)
+        
+        print(f"\n📹 VIDEO: {result.video_id}")
+        
+        print(f"\n📊 GENERATION:")
+        print(f"  Generated: {result.questions_generated}")
+        print(f"  Validated: {result.questions_validated} ({result.validation_pass_rate:.1%})")
+        print(f"  Selected: {result.final_selected}")
+        
+        print(f"\n🤖 GEMINI TESTING:")
+        print(f"  Tested: {result.questions_tested}")
+        print(f"  Fail Rate: {result.gemini_fail_rate:.1%} {'✓' if result.gemini_fail_rate >= 0.30 else '✗'}")
+        
+        print(f"\n🛡️  HALLUCINATION:")
+        print(f"  Rate: {result.hallucination_rate:.2%} {'✓' if result.hallucination_rate <= 0.001 else '✗'}")
+        
+        print(f"\n💰 COST & MARGIN:")
+        print(f"  Total Cost: ${result.total_cost:.2f} {'✓' if result.total_cost <= 3.36 else '✗'}")
+        print(f"  Profit Margin: {result.profit_margin:.1%}")
+        
+        print(f"\n📁 OUTPUTS:")
+        print(f"  Excel: {result.excel_path}")
+        print(f"  JSON: {result.json_output_path}")
+        
+        print(f"\n✅ STATUS: {'SUCCESS ✓' if result.success else 'FAILED ✗'}")
+        print("="*80 + "\n")
+
+
+# ============================================================================
+# MAIN ENTRY POINT
+# ============================================================================
+
+async def main():
+    """
+    Main entry point for pipeline execution
+
+    NOTE: This is for testing/development only.
+    For production use, upload videos via the web UI at http://localhost:5173/upload/video
+    The web UI will automatically trigger the pipeline via the API.
+    """
+    import sys
+
+    # Check if a video path was provided as command line argument
+    if len(sys.argv) > 1:
+        video_path = sys.argv[1]
+        video_id = sys.argv[2] if len(sys.argv) > 2 else None
+    else:
+        print("="*80)
+        print("ERROR: No video file provided!")
+        print("="*80)
+        print()
+        print("This script requires a video file to process.")
+        print()
+        print("OPTIONS:")
+        print()
+        print("1. Run from command line with video path:")
+        print("   python main_pipeline.py /path/to/video.mp4 [optional_video_id]")
+        print()
+        print("2. Use the Web UI (RECOMMENDED):")
+        print("   - Start the backend: cd backend && uvicorn main:app --reload")
+        print("   - Start the frontend: cd frontend && npm run dev")
+        print("   - Visit: http://localhost:5173/upload/video")
+        print("   - Upload your video and processing will start automatically")
+        print()
+        print("="*80)
+        return 1
+
+    # Create config with provided video path
+    try:
+        config = PipelineConfig(
+            video_path=video_path,
+            video_id=video_id,
+            google_ai_api_key=os.getenv('GOOGLE_AI_API_KEY'),
+            openai_api_key=os.getenv('OPENAI_API_KEY')
+        )
+    except FileNotFoundError as e:
+        print(f"\n❌ ERROR: {e}\n")
+        return 1
+
+    pipeline = QuestionGenerationPipeline(config)
+
+    # Stage 0: Generate questions
+    result = await pipeline.run()
+
+    if result.awaiting_stage1_review:
+        print("✅ Questions generated! Waiting for Stage 1 review...")
+        print("   Pipeline will continue via API after human review")
+
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(asyncio.run(main()))

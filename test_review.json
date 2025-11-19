@@ -1,0 +1,7 @@
+{
+  "decision": "corrected",
+  "corrected_answer": {"answer": "yes", "confidence": 0.95},
+  "confidence": "high",
+  "notes": "Claude was correct. The visual text clearly shows evidence supporting a yes answer.",
+  "review_duration_seconds": 45
+}

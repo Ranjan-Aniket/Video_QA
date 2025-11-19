@@ -1,0 +1,557 @@
+"""
+Smart Pipeline Router - API endpoints for the new evidence-first architecture
+
+Endpoints for:
+- Running the complete smart pipeline
+- Getting audio analysis
+- Getting genre analysis
+- Getting extracted frames
+- Getting evidence items
+- Getting generated questions
+- Getting validation results
+"""
+
+from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from typing import List, Optional, Dict, Any
+from pathlib import Path
+import json
+import logging
+import sys
+
+# Add project root to path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+from processing.smart_pipeline import SmartEvidencePipeline
+from database.operations import db_manager
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(
+    prefix="/api/smart-pipeline",
+    tags=["Smart Pipeline"]
+)
+
+
+# ============================================================================
+# Request/Response Models
+# ============================================================================
+
+class SmartPipelineRequest(BaseModel):
+    video_id: str
+    enable_gpt4: bool = False
+    enable_claude: bool = False
+    enable_gemini: bool = False
+
+
+class SmartPipelineStatus(BaseModel):
+    video_id: str
+    status: str  # "pending", "processing", "completed", "failed"
+    progress: float  # 0.0 to 1.0
+    current_phase: str
+    error: Optional[str] = None
+
+
+class AudioAnalysisResponse(BaseModel):
+    transcript: str
+    duration: float
+    segments_count: int
+    speaker_count: int
+    language: str
+
+
+class GenreAnalysisResponse(BaseModel):
+    primary_genre: str
+    confidence: float
+    secondary_genres: List[str]
+    emotional_tone: str
+    recommended_models: List[str]
+    key_moments_count: int
+
+
+class FrameExtractionResponse(BaseModel):
+    total_frames: int
+    key_moment_frames: int
+    bulk_frames: int
+    cost_savings: str
+
+
+class EvidenceResponse(BaseModel):
+    evidence_count: int
+    bulk_evidence: int
+    key_moment_evidence: int
+
+
+class QuestionsResponse(BaseModel):
+    total_questions: int
+    template_questions: int
+    gpt4_questions: int
+    claude_questions: int
+
+
+class ValidationResponse(BaseModel):
+    validated_questions: int
+    consensus_reached: int
+    needs_review: int
+
+
+# ============================================================================
+# Endpoints
+# ============================================================================
+
+@router.post("/run")
+async def run_smart_pipeline(
+    request: SmartPipelineRequest,
+    background_tasks: BackgroundTasks
+):
+    """
+    Run the complete smart pipeline on a video
+
+    This triggers all 6 phases:
+    1. Audio Analysis
+    2. Genre Detection
+    3. Frame Extraction
+    4. Evidence Extraction
+    5. Question Generation
+    6. Multi-Model Validation
+    """
+    try:
+        # Get video path from database
+        with db_manager.get_session() as session:
+            from sqlalchemy import text
+            result = session.execute(
+                text("SELECT video_url FROM videos WHERE video_id = :video_id"),
+                {"video_id": request.video_id}
+            ).fetchone()
+
+            if not result:
+                raise HTTPException(status_code=404, detail=f"Video {request.video_id} not found")
+
+            video_path = result[0]
+
+        # Check if video file exists
+        if not Path(video_path).exists():
+            raise HTTPException(status_code=404, detail=f"Video file not found: {video_path}")
+
+        # Run pipeline in background
+        background_tasks.add_task(
+            _run_pipeline_background,
+            video_path=video_path,
+            video_id=request.video_id,
+            enable_gpt4=request.enable_gpt4,
+            enable_claude=request.enable_claude
+        )
+
+        return {
+            "status": "started",
+            "video_id": request.video_id,
+            "message": "Smart pipeline started in background"
+        }
+
+    except Exception as e:
+        logger.error(f"Error starting smart pipeline: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _run_pipeline_background(
+    video_path: str,
+    video_id: str,
+    enable_gpt4: bool,
+    enable_claude: bool
+):
+    """Background task to run the pipeline"""
+    try:
+        logger.info(f"Starting smart pipeline for video {video_id}")
+
+        # Create pipeline
+        pipeline = SmartEvidencePipeline(
+            video_path=video_path,
+            enable_gpt4=enable_gpt4,
+            enable_claude=enable_claude
+        )
+
+        # Run pipeline
+        results = pipeline.run_full_pipeline()
+
+        logger.info(f"Smart pipeline completed for video {video_id}")
+
+    except Exception as e:
+        logger.error(f"Smart pipeline failed for video {video_id}: {e}", exc_info=True)
+
+
+@router.get("/status/{video_id}")
+async def get_pipeline_status(video_id: str):
+    """Get the status of smart pipeline processing for a video"""
+    try:
+        # Get video path from database
+        with db_manager.get_session() as session:
+            from sqlalchemy import text
+            result = session.execute(
+                text("SELECT video_url FROM videos WHERE video_id = :video_id"),
+                {"video_id": video_id}
+            ).fetchone()
+
+            if not result:
+                raise HTTPException(status_code=404, detail=f"Video {video_id} not found in database")
+
+            video_path = result[0]
+
+        # Get video file info
+        video_file = Path(video_path)
+        if not video_file.exists():
+            raise HTTPException(status_code=404, detail=f"Video file not found: {video_path}")
+
+        video_stem = video_file.stem
+        video_dir = Path("uploads")
+
+        # Check which phases are complete
+        phases_complete = []
+
+        if (video_dir / f"{video_stem}_audio_analysis.json").exists():
+            phases_complete.append("audio_analysis")
+
+        if (video_dir / f"{video_stem}_genre_analysis.json").exists():
+            phases_complete.append("genre_detection")
+
+        if (video_dir / f"{video_stem}_pipeline_results.json").exists():
+            phases_complete.append("frame_planning")
+
+        if (video_dir / "frames" / video_stem / "frames_metadata.json").exists():
+            phases_complete.append("frame_extraction")
+
+        if (video_dir / f"{video_stem}_questions.json").exists():
+            phases_complete.append("question_generation")
+
+        if (video_dir / f"{video_stem}_validation.json").exists():
+            phases_complete.append("validation")
+
+        # Calculate progress
+        total_phases = 6
+        progress = len(phases_complete) / total_phases
+
+        # Determine status
+        if len(phases_complete) == 0:
+            status = "pending"
+            current_phase = "Not started"
+        elif len(phases_complete) == total_phases:
+            status = "completed"
+            current_phase = "All phases complete"
+        else:
+            status = "processing"
+            current_phase = f"Phase {len(phases_complete) + 1}/6"
+
+        return {
+            "video_id": video_id,
+            "status": status,
+            "progress": progress,
+            "current_phase": current_phase,
+            "phases_complete": phases_complete
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting pipeline status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/audio/{video_id}", response_model=AudioAnalysisResponse)
+async def get_audio_analysis(video_id: str):
+    """Get audio analysis results for a video"""
+    try:
+        # Get video path from database
+        with db_manager.get_session() as session:
+            from sqlalchemy import text
+            result = session.execute(
+                text("SELECT video_url FROM videos WHERE video_id = :video_id"),
+                {"video_id": video_id}
+            ).fetchone()
+
+            if not result:
+                raise HTTPException(status_code=404, detail=f"Video {video_id} not found")
+
+            video_path = result[0]
+
+        # Get video file info
+        video_file = Path(video_path)
+        video_stem = video_file.stem
+        video_dir = Path("uploads")
+
+        # Find audio analysis file
+        analysis_file = video_dir / f"{video_stem}_audio_analysis.json"
+        if not analysis_file.exists():
+            raise HTTPException(status_code=404, detail="Audio analysis not found")
+
+        # Load analysis
+        with open(analysis_file, 'r') as f:
+            analysis = json.load(f)
+
+        return AudioAnalysisResponse(
+            transcript=analysis["transcript"][:500] + "...",  # Truncate for response
+            duration=analysis["duration"],
+            segments_count=len(analysis["segments"]),
+            speaker_count=analysis["speaker_count"],
+            language=analysis["language"]
+        )
+
+    except Exception as e:
+        logger.error(f"Error getting audio analysis: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/genre/{video_id}", response_model=GenreAnalysisResponse)
+async def get_genre_analysis(video_id: str):
+    """Get genre analysis results for a video"""
+    try:
+        # Get video path from database
+        with db_manager.get_session() as session:
+            from sqlalchemy import text
+            result = session.execute(
+                text("SELECT video_url FROM videos WHERE video_id = :video_id"),
+                {"video_id": video_id}
+            ).fetchone()
+
+            if not result:
+                raise HTTPException(status_code=404, detail=f"Video {video_id} not found")
+
+            video_path = result[0]
+
+        # Get video file info
+        video_file = Path(video_path)
+        video_stem = video_file.stem
+        video_dir = Path("uploads")
+
+        # Find genre analysis file
+        analysis_file = video_dir / f"{video_stem}_genre_analysis.json"
+        if not analysis_file.exists():
+            raise HTTPException(status_code=404, detail="Genre analysis not found")
+
+        # Load analysis
+        with open(analysis_file, 'r') as f:
+            analysis = json.load(f)
+
+        return GenreAnalysisResponse(
+            primary_genre=analysis["primary_genre"],
+            confidence=analysis["confidence"],
+            secondary_genres=analysis["secondary_genres"],
+            emotional_tone=analysis["emotional_tone"],
+            recommended_models=analysis["recommended_models"],
+            key_moments_count=len(analysis["key_moments"])
+        )
+
+    except Exception as e:
+        logger.error(f"Error getting genre analysis: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/frames/{video_id}", response_model=FrameExtractionResponse)
+async def get_frame_extraction(video_id: str):
+    """Get frame extraction results for a video"""
+    try:
+        # Get video path from database
+        with db_manager.get_session() as session:
+            from sqlalchemy import text
+            result = session.execute(
+                text("SELECT video_url FROM videos WHERE video_id = :video_id"),
+                {"video_id": video_id}
+            ).fetchone()
+
+            if not result:
+                raise HTTPException(status_code=404, detail=f"Video {video_id} not found")
+
+            video_path = result[0]
+
+        # Get video file info
+        video_file = Path(video_path)
+        video_stem = video_file.stem
+        video_dir = Path("uploads")
+
+        # Find pipeline results file
+        results_file = video_dir / f"{video_stem}_pipeline_results.json"
+        if not results_file.exists():
+            raise HTTPException(status_code=404, detail="Frame extraction results not found")
+
+        # Load results
+        with open(results_file, 'r') as f:
+            results = json.load(f)
+
+        frame_plan = results.get("frame_plan", {})
+
+        return FrameExtractionResponse(
+            total_frames=frame_plan.get("total_frames", 0),
+            key_moment_frames=frame_plan.get("key_moment_frames", 0),
+            bulk_frames=frame_plan.get("bulk_frames", 0),
+            cost_savings=frame_plan.get("cost_estimate", {}).get("savings_vs_all_expensive", "0%")
+        )
+
+    except Exception as e:
+        logger.error(f"Error getting frame extraction: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/questions/{video_id}")
+async def get_questions(video_id: str):
+    """Get generated questions for a video"""
+    try:
+        # Get video path from database
+        with db_manager.get_session() as session:
+            from sqlalchemy import text
+            result = session.execute(
+                text("SELECT video_url FROM videos WHERE video_id = :video_id"),
+                {"video_id": video_id}
+            ).fetchone()
+
+            if not result:
+                raise HTTPException(status_code=404, detail=f"Video {video_id} not found")
+
+            video_path = result[0]
+
+        # Get video file info
+        video_file = Path(video_path)
+        video_stem = video_file.stem
+        video_dir = Path("uploads")
+
+        # Find questions file
+        questions_file = video_dir / f"{video_stem}_questions.json"
+        if not questions_file.exists():
+            raise HTTPException(status_code=404, detail="Questions not found")
+
+        # Load questions
+        with open(questions_file, 'r') as f:
+            questions_data = json.load(f)
+
+        return {
+            "total_questions": questions_data["generation_info"]["total_questions"],
+            "template_questions": questions_data["generation_info"]["template_questions"],
+            "gpt4_questions": questions_data["generation_info"]["gpt4_questions"],
+            "claude_questions": questions_data["generation_info"]["claude_questions"],
+            "questions": questions_data["questions"]
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting questions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/validation/{video_id}")
+async def get_validation(video_id: str):
+    """Get multi-model validation results for a video"""
+    try:
+        # Get video path from database
+        with db_manager.get_session() as session:
+            from sqlalchemy import text
+            result = session.execute(
+                text("SELECT video_url FROM videos WHERE video_id = :video_id"),
+                {"video_id": video_id}
+            ).fetchone()
+
+            if not result:
+                raise HTTPException(status_code=404, detail=f"Video {video_id} not found")
+
+            video_path = result[0]
+
+        # Get video file info
+        video_file = Path(video_path)
+        video_stem = video_file.stem
+        video_dir = Path("uploads")
+
+        # Find validation file
+        validation_file = video_dir / f"{video_stem}_validation.json"
+        if not validation_file.exists():
+            raise HTTPException(status_code=404, detail="Validation results not found")
+
+        # Load validation
+        with open(validation_file, 'r') as f:
+            validation_data = json.load(f)
+
+        return {
+            "summary": validation_data["summary"],
+            "validations": validation_data["validations"]
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting validation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/transcript/{video_id}")
+async def get_full_transcript(video_id: str):
+    """Get the full transcript with timestamps"""
+    try:
+        # Get video path from database
+        with db_manager.get_session() as session:
+            from sqlalchemy import text
+            result = session.execute(
+                text("SELECT video_url FROM videos WHERE video_id = :video_id"),
+                {"video_id": video_id}
+            ).fetchone()
+
+            if not result:
+                raise HTTPException(status_code=404, detail=f"Video {video_id} not found")
+
+            video_path = result[0]
+
+        # Get video file info
+        video_file = Path(video_path)
+        video_stem = video_file.stem
+        video_dir = Path("uploads")
+
+        # Find audio analysis file
+        analysis_file = video_dir / f"{video_stem}_audio_analysis.json"
+        if not analysis_file.exists():
+            raise HTTPException(status_code=404, detail="Transcript not found")
+
+        # Load analysis
+        with open(analysis_file, 'r') as f:
+            analysis = json.load(f)
+
+        return {
+            "transcript": analysis["transcript"],
+            "segments": analysis["segments"],
+            "duration": analysis["duration"],
+            "speaker_count": analysis["speaker_count"]
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting transcript: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/{video_id}")
+async def delete_pipeline_results(video_id: str):
+    """Delete all smart pipeline results for a video"""
+    try:
+        video_dir = Path("uploads")
+        deleted_files = []
+
+        # Delete all related files
+        patterns = [
+            f"*{video_id}*_audio_analysis.json",
+            f"*{video_id}*_genre_analysis.json",
+            f"*{video_id}*_pipeline_results.json",
+            f"*{video_id}*_questions.json",
+            f"*{video_id}*_validation.json"
+        ]
+
+        for pattern in patterns:
+            for file in video_dir.glob(pattern):
+                file.unlink()
+                deleted_files.append(str(file))
+
+        # Delete frames directory
+        video_files = list(video_dir.glob(f"*{video_id}*.mp4"))
+        if video_files:
+            frames_dir = video_dir / "frames" / video_files[0].stem
+            if frames_dir.exists():
+                import shutil
+                shutil.rmtree(frames_dir)
+                deleted_files.append(str(frames_dir))
+
+        return {
+            "status": "deleted",
+            "files_deleted": len(deleted_files),
+            "files": deleted_files
+        }
+
+    except Exception as e:
+        logger.error(f"Error deleting pipeline results: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

@@ -1,0 +1,564 @@
+"""
+Batch Processor - Parallel Video Processing
+
+Handles batch processing of multiple videos using the main pipeline.
+Tracks progress toward 1M video goal with cost monitoring and parallelization.
+
+BUSINESS GOALS:
+- Process 1,000,000 videos
+- Maintain $3.36 cost per video ($3.36M total)
+- Generate $8M revenue (58% margin = $4.64M profit)
+- Deliver professional Excel per video
+"""
+
+from typing import List, Dict, Optional, Any
+import logging
+from pathlib import Path
+from dataclasses import dataclass, field
+from datetime import datetime
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import json
+import time
+from tqdm import tqdm
+
+from main_pipeline import QuestionGenerationPipeline, PipelineConfig, PipelineResult
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class BatchConfig:
+    """Batch processing configuration"""
+    
+    # Video sources
+    video_paths: List[str] = field(default_factory=list)
+    video_dir: Optional[Path] = None  # Process all videos in directory
+    video_list_file: Optional[Path] = None  # Load from text file
+    
+    # Parallelization
+    max_workers: int = 4  # Parallel video processing
+    
+    # Pipeline configuration (inherited by all videos)
+    pipeline_config_template: Optional[PipelineConfig] = None
+    
+    # API Keys (shared across all workers)
+    google_ai_api_key: Optional[str] = None
+    openai_api_key: Optional[str] = None
+    
+    # Progress tracking
+    start_from_index: int = 0  # Resume from specific video
+    max_videos: Optional[int] = None  # Limit number of videos
+    
+    # Output
+    batch_output_dir: Path = Path("./batch_outputs")
+    batch_id: Optional[str] = None
+    
+    # Cost monitoring
+    cumulative_cost_limit: Optional[float] = None  # Stop if exceeded
+    alert_on_high_cost: bool = True
+    cost_alert_threshold: float = 4.0  # Alert if video exceeds $4
+    
+    # Error handling
+    stop_on_error: bool = False  # Continue on errors
+    max_failures: Optional[int] = None  # Stop after N failures
+    retry_failed: bool = False  # Retry failed videos
+    
+    def __post_init__(self):
+        """Initialize and validate batch configuration"""
+        # Generate batch ID if not provided
+        if not self.batch_id:
+            self.batch_id = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
+        # Create output directory
+        self.batch_output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Load video paths
+        if self.video_dir:
+            # Load all videos from directory
+            video_extensions = ['.mp4', '.avi', '.mov', '.mkv']
+            self.video_paths.extend([
+                str(p) for p in self.video_dir.iterdir()
+                if p.suffix.lower() in video_extensions
+            ])
+        
+        if self.video_list_file:
+            # Load from text file
+            with open(self.video_list_file, 'r') as f:
+                self.video_paths.extend([
+                    line.strip() for line in f
+                    if line.strip() and not line.startswith('#')
+                ])
+        
+        # Apply limits
+        if self.start_from_index > 0:
+            self.video_paths = self.video_paths[self.start_from_index:]
+        
+        if self.max_videos:
+            self.video_paths = self.video_paths[:self.max_videos]
+        
+        logger.info(f"Batch initialized: {len(self.video_paths)} videos to process")
+
+
+@dataclass
+class BatchResult:
+    """Batch processing results"""
+    
+    batch_id: str
+    total_videos: int
+    
+    # Processing results
+    successful: int = 0
+    failed: int = 0
+    skipped: int = 0
+    
+    # Individual results
+    video_results: List[Dict[str, Any]] = field(default_factory=list)
+    failed_videos: List[Dict[str, Any]] = field(default_factory=list)
+    
+    # Aggregate metrics
+    total_questions_generated: int = 0
+    total_questions_selected: int = 0
+    
+    avg_validation_pass_rate: float = 0.0
+    avg_gemini_fail_rate: float = 0.0
+    avg_hallucination_rate: float = 0.0
+    
+    # Cost & revenue
+    total_cost: float = 0.0
+    avg_cost_per_video: float = 0.0
+    total_revenue: float = 0.0  # $8 per successful video
+    total_profit: float = 0.0
+    profit_margin: float = 0.0
+    
+    # Timing
+    total_time_seconds: float = 0.0
+    avg_time_per_video: float = 0.0
+    
+    # Progress toward 1M goal
+    progress_to_1m: float = 0.0  # Percentage
+    estimated_total_cost_to_1m: float = 0.0
+    estimated_total_revenue_to_1m: float = 0.0
+    estimated_total_profit_to_1m: float = 0.0
+    
+    # Timestamp
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary"""
+        return {
+            'batch_id': self.batch_id,
+            'total_videos': self.total_videos,
+            'successful': self.successful,
+            'failed': self.failed,
+            'skipped': self.skipped,
+            'total_questions_generated': self.total_questions_generated,
+            'total_questions_selected': self.total_questions_selected,
+            'avg_validation_pass_rate': round(self.avg_validation_pass_rate, 3),
+            'avg_gemini_fail_rate': round(self.avg_gemini_fail_rate, 3),
+            'avg_hallucination_rate': round(self.avg_hallucination_rate, 4),
+            'cost': {
+                'total': round(self.total_cost, 2),
+                'avg_per_video': round(self.avg_cost_per_video, 2)
+            },
+            'revenue': {
+                'total': round(self.total_revenue, 2),
+                'profit': round(self.total_profit, 2),
+                'margin': round(self.profit_margin, 3)
+            },
+            'performance': {
+                'total_time_seconds': round(self.total_time_seconds, 1),
+                'avg_time_per_video': round(self.avg_time_per_video, 1)
+            },
+            'progress_to_1m': {
+                'percentage': round(self.progress_to_1m, 4),
+                'estimated_cost_to_1m': round(self.estimated_total_cost_to_1m, 2),
+                'estimated_revenue_to_1m': round(self.estimated_total_revenue_to_1m, 2),
+                'estimated_profit_to_1m': round(self.estimated_total_profit_to_1m, 2)
+            },
+            'timestamp': self.timestamp
+        }
+
+
+class BatchProcessor:
+    """
+    Batch processor for parallel video processing
+    
+    Coordinates processing of multiple videos with progress tracking,
+    cost monitoring, and parallel execution.
+    """
+    
+    def __init__(self, config: BatchConfig):
+        """
+        Initialize batch processor
+        
+        Args:
+            config: Batch configuration
+        """
+        self.config = config
+        self.start_time = None
+        
+        # Results tracking
+        self.results: List[PipelineResult] = []
+        self.failures: List[Dict[str, Any]] = []
+        
+        # Cost tracking
+        self.cumulative_cost = 0.0
+        self.cost_alerts = []
+        
+        logger.info("="*80)
+        logger.info(f"BATCH PROCESSOR INITIALIZED: {self.config.batch_id}")
+        logger.info(f"Videos to process: {len(self.config.video_paths)}")
+        logger.info(f"Max workers: {self.config.max_workers}")
+        logger.info("="*80)
+    
+    def run(self) -> BatchResult:
+        """
+        Execute batch processing
+        
+        Returns:
+            BatchResult with aggregate metrics
+        """
+        self.start_time = time.time()
+        
+        logger.info(f"\n🚀 Starting batch processing: {len(self.config.video_paths)} videos\n")
+        
+        # Process videos in parallel
+        if self.config.max_workers > 1:
+            self._process_parallel()
+        else:
+            self._process_sequential()
+        
+        # Generate batch result
+        batch_result = self._generate_batch_result()
+        
+        # Export results
+        self._export_batch_results(batch_result)
+        
+        # Print summary
+        self._print_batch_summary(batch_result)
+        
+        return batch_result
+    
+    def _process_sequential(self):
+        """Process videos sequentially"""
+        for idx, video_path in enumerate(tqdm(
+            self.config.video_paths,
+            desc="Processing videos",
+            unit="video"
+        )):
+            try:
+                result = self._process_single_video(video_path, idx)
+                self._handle_result(result, video_path)
+                
+                # Check stopping conditions
+                if self._should_stop():
+                    logger.warning("Stopping batch processing due to limits")
+                    break
+                    
+            except Exception as e:
+                self._handle_failure(video_path, str(e))
+                
+                if self.config.stop_on_error:
+                    logger.error("Stopping on error as configured")
+                    break
+    
+    def _process_parallel(self):
+        """Process videos in parallel using ProcessPoolExecutor"""
+        with ProcessPoolExecutor(max_workers=self.config.max_workers) as executor:
+            # Submit all videos
+            future_to_video = {
+                executor.submit(
+                    self._process_single_video,
+                    video_path,
+                    idx
+                ): (video_path, idx)
+                for idx, video_path in enumerate(self.config.video_paths)
+            }
+            
+            # Process results as they complete
+            with tqdm(total=len(self.config.video_paths), desc="Processing videos", unit="video") as pbar:
+                for future in as_completed(future_to_video):
+                    video_path, idx = future_to_video[future]
+                    
+                    try:
+                        result = future.result()
+                        self._handle_result(result, video_path)
+                        pbar.update(1)
+                        
+                        # Check stopping conditions
+                        if self._should_stop():
+                            logger.warning("Stopping batch processing due to limits")
+                            # Cancel remaining futures
+                            for f in future_to_video:
+                                f.cancel()
+                            break
+                            
+                    except Exception as e:
+                        self._handle_failure(video_path, str(e))
+                        pbar.update(1)
+                        
+                        if self.config.stop_on_error:
+                            logger.error("Stopping on error as configured")
+                            break
+    
+    def _process_single_video(self, video_path: str, idx: int) -> PipelineResult:
+        """
+        Process a single video through pipeline
+        
+        Args:
+            video_path: Path to video file
+            idx: Video index in batch
+            
+        Returns:
+            PipelineResult from pipeline execution
+        """
+        # Create pipeline config for this video
+        video_id = f"{self.config.batch_id}_video_{idx:04d}"
+        
+        pipeline_config = PipelineConfig(
+            video_path=video_path,
+            video_id=video_id,
+            google_ai_api_key=self.config.google_ai_api_key,
+            openai_api_key=self.config.openai_api_key,
+            output_dir=self.config.batch_output_dir / video_id,
+            logs_dir=self.config.batch_output_dir / "logs",
+            cache_dir=self.config.batch_output_dir / "cache"
+        )
+        
+        # Copy settings from template if provided
+        if self.config.pipeline_config_template:
+            template = self.config.pipeline_config_template
+            pipeline_config.target_question_count = template.target_question_count
+            pipeline_config.tier1_template_count = template.tier1_template_count
+            pipeline_config.tier2_constrained_count = template.tier2_constrained_count
+            pipeline_config.tier3_creative_count = template.tier3_creative_count
+            pipeline_config.enable_gemini_testing = template.enable_gemini_testing
+            pipeline_config.enable_pattern_learning = template.enable_pattern_learning
+        
+        # Run pipeline
+        pipeline = QuestionGenerationPipeline(pipeline_config)
+        result = pipeline.run()
+        
+        return result
+    
+    def _handle_result(self, result: PipelineResult, video_path: str):
+        """Handle successful video processing result"""
+        if result.success:
+            self.results.append(result)
+            
+            # Track cost
+            self.cumulative_cost += result.total_cost
+            
+            # Cost alert
+            if self.config.alert_on_high_cost and result.total_cost > self.config.cost_alert_threshold:
+                alert = f"⚠️  High cost video: {video_path} - ${result.total_cost:.2f}"
+                self.cost_alerts.append(alert)
+                logger.warning(alert)
+            
+            logger.info(f"✓ {result.video_id}: ${result.total_cost:.2f} | "
+                       f"{result.total_time_seconds:.1f}s | "
+                       f"{len(result.selected_questions)} selected")
+        else:
+            self._handle_failure(video_path, result.error_message)
+    
+    def _handle_failure(self, video_path: str, error_message: str):
+        """Handle video processing failure"""
+        self.failures.append({
+            'video_path': video_path,
+            'error': error_message,
+            'timestamp': datetime.now().isoformat()
+        })
+        
+        logger.error(f"✗ Failed: {video_path} - {error_message}")
+    
+    def _should_stop(self) -> bool:
+        """Check if batch processing should stop"""
+        # Check failure limit
+        if self.config.max_failures and len(self.failures) >= self.config.max_failures:
+            return True
+        
+        # Check cost limit
+        if self.config.cumulative_cost_limit and self.cumulative_cost >= self.config.cumulative_cost_limit:
+            logger.warning(f"Cost limit reached: ${self.cumulative_cost:.2f}")
+            return True
+        
+        return False
+    
+    def _generate_batch_result(self) -> BatchResult:
+        """Generate aggregate batch result"""
+        batch_result = BatchResult(
+            batch_id=self.config.batch_id,
+            total_videos=len(self.config.video_paths),
+            successful=len(self.results),
+            failed=len(self.failures)
+        )
+        
+        if not self.results:
+            batch_result.total_time_seconds = time.time() - self.start_time
+            return batch_result
+        
+        # Aggregate metrics
+        batch_result.total_questions_generated = sum(r.total_generated for r in self.results)
+        batch_result.total_questions_selected = sum(len(r.selected_questions) for r in self.results)
+        
+        batch_result.avg_validation_pass_rate = sum(r.validation_pass_rate for r in self.results) / len(self.results)
+        batch_result.avg_gemini_fail_rate = sum(r.gemini_fail_rate for r in self.results) / len(self.results)
+        batch_result.avg_hallucination_rate = sum(r.hallucination_rate for r in self.results) / len(self.results)
+        
+        # Cost & revenue
+        batch_result.total_cost = sum(r.total_cost for r in self.results)
+        batch_result.avg_cost_per_video = batch_result.total_cost / len(self.results)
+        batch_result.total_revenue = len(self.results) * 8.0  # $8 per video
+        batch_result.total_profit = batch_result.total_revenue - batch_result.total_cost
+        batch_result.profit_margin = batch_result.total_profit / batch_result.total_revenue
+        
+        # Timing
+        batch_result.total_time_seconds = time.time() - self.start_time
+        batch_result.avg_time_per_video = batch_result.total_time_seconds / len(self.results)
+        
+        # Progress to 1M
+        batch_result.progress_to_1m = len(self.results) / 1_000_000
+        batch_result.estimated_total_cost_to_1m = batch_result.avg_cost_per_video * 1_000_000
+        batch_result.estimated_total_revenue_to_1m = 8.0 * 1_000_000
+        batch_result.estimated_total_profit_to_1m = (
+            batch_result.estimated_total_revenue_to_1m - batch_result.estimated_total_cost_to_1m
+        )
+        
+        # Store individual results
+        batch_result.video_results = [r.to_dict() for r in self.results]
+        batch_result.failed_videos = self.failures
+        
+        return batch_result
+    
+    def _export_batch_results(self, batch_result: BatchResult):
+        """Export batch results to JSON"""
+        output_path = self.config.batch_output_dir / f"{self.config.batch_id}_summary.json"
+        
+        with open(output_path, 'w') as f:
+            json.dump(batch_result.to_dict(), f, indent=2)
+        
+        logger.info(f"✓ Batch results exported: {output_path}")
+    
+    def _print_batch_summary(self, result: BatchResult):
+        """Print batch processing summary"""
+        print("\n" + "="*80)
+        print("🎯 BATCH PROCESSING SUMMARY")
+        print("="*80)
+        
+        print(f"\n📊 BATCH: {result.batch_id}")
+        print(f"  Total Videos: {result.total_videos}")
+        print(f"  Successful: {result.successful}")
+        print(f"  Failed: {result.failed}")
+        print(f"  Success Rate: {result.successful/result.total_videos:.1%}")
+        
+        print(f"\n📈 AGGREGATE METRICS:")
+        print(f"  Total Questions Generated: {result.total_questions_generated}")
+        print(f"  Total Questions Selected: {result.total_questions_selected}")
+        print(f"  Avg Validation Pass Rate: {result.avg_validation_pass_rate:.1%}")
+        print(f"  Avg Gemini Fail Rate: {result.avg_gemini_fail_rate:.1%}")
+        print(f"  Avg Hallucination Rate: {result.avg_hallucination_rate:.2%}")
+        
+        print(f"\n💰 COST & REVENUE:")
+        print(f"  Total Cost: ${result.total_cost:.2f}")
+        print(f"  Avg Cost/Video: ${result.avg_cost_per_video:.2f} {'✓' if result.avg_cost_per_video <= 3.36 else '✗'}")
+        print(f"  Total Revenue: ${result.total_revenue:.2f}")
+        print(f"  Total Profit: ${result.total_profit:.2f}")
+        print(f"  Profit Margin: {result.profit_margin:.1%} {'✓' if result.profit_margin >= 0.58 else '✗'}")
+        
+        print(f"\n⏱️  PERFORMANCE:")
+        print(f"  Total Time: {result.total_time_seconds:.1f}s ({result.total_time_seconds/60:.1f} min)")
+        print(f"  Avg Time/Video: {result.avg_time_per_video:.1f}s")
+        print(f"  Throughput: {result.successful/(result.total_time_seconds/3600):.1f} videos/hour")
+        
+        print(f"\n🎯 PROGRESS TO 1M GOAL:")
+        print(f"  Current Progress: {result.progress_to_1m:.4%} ({result.successful:,} / 1,000,000)")
+        print(f"  Estimated Cost to 1M: ${result.estimated_total_cost_to_1m:,.2f}")
+        print(f"  Estimated Revenue to 1M: ${result.estimated_total_revenue_to_1m:,.2f}")
+        print(f"  Estimated Profit to 1M: ${result.estimated_total_profit_to_1m:,.2f}")
+        
+        if self.cost_alerts:
+            print(f"\n⚠️  COST ALERTS ({len(self.cost_alerts)}):")
+            for alert in self.cost_alerts[:5]:  # Show first 5
+                print(f"  {alert}")
+        
+        if result.failed > 0:
+            print(f"\n❌ FAILURES ({result.failed}):")
+            for failure in result.failed_videos[:5]:  # Show first 5
+                print(f"  {failure['video_path']}: {failure['error'][:60]}...")
+        
+        print("="*80 + "\n")
+
+
+# ============================================================================
+# MAIN ENTRY POINT
+# ============================================================================
+
+def main():
+    """Main entry point for batch processing"""
+    import os
+    
+    # Example configuration
+    config = BatchConfig(
+        # Video sources
+        video_dir=Path("./videos"),  # Process all videos in this directory
+        # OR
+        # video_paths=["video1.mp4", "video2.mp4", "video3.mp4"]
+        # OR
+        # video_list_file=Path("video_list.txt")
+        
+        # Parallelization
+        max_workers=4,  # Process 4 videos in parallel
+        
+        # API Keys
+        google_ai_api_key=os.getenv('GOOGLE_AI_API_KEY'),
+        openai_api_key=os.getenv('OPENAI_API_KEY'),
+        
+        # Progress
+        start_from_index=0,
+        max_videos=10,  # Process first 10 videos (for testing)
+        
+        # Output
+        batch_output_dir=Path("./batch_outputs"),
+        
+        # Cost monitoring
+        cumulative_cost_limit=None,  # No limit
+        alert_on_high_cost=True,
+        cost_alert_threshold=4.0,
+        
+        # Error handling
+        stop_on_error=False,
+        max_failures=5  # Stop after 5 failures
+    )
+    
+    # Create pipeline template
+    config.pipeline_config_template = PipelineConfig(
+        video_path="",  # Will be set per video
+        target_question_count=30,
+        tier1_template_count=8,
+        tier2_constrained_count=17,
+        tier3_creative_count=5,
+        enable_gemini_testing=True,
+        enable_pattern_learning=True,
+        enable_excel_export=True
+    )
+    
+    # Run batch processing
+    processor = BatchProcessor(config)
+    result = processor.run()
+    
+    # Print final status
+    if result.successful > 0:
+        print(f"\n✅ Batch processing complete!")
+        print(f"📊 Processed {result.successful} videos successfully")
+        print(f"💰 Total profit: ${result.total_profit:.2f}")
+        print(f"📈 Progress: {result.progress_to_1m:.4%} toward 1M goal")
+    else:
+        print(f"\n❌ Batch processing failed - no successful videos")
+        return 1
+    
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())

@@ -1,0 +1,232 @@
+/**
+ * Reviews API Client
+ * 
+ * HTTP client for all review endpoints
+ */
+
+import {
+  Question,
+  ReviewProgress,
+  GeminiFailure,
+  VideoStatus,
+  ApproveQuestionRequest,
+  RejectQuestionRequest,
+  BulkReviewRequest,
+  RegenerateQuestionRequest,
+  Stage2SelectionRequest,
+  ApproveQuestionResponse,
+  RejectQuestionResponse,
+  RegenerateQuestionResponse,
+  Stage2SelectionResponse,
+} from './types';
+
+// API base URL - configure for your environment
+const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+
+// ============================================================================
+// ERROR HANDLING
+// ============================================================================
+
+class APIError extends Error {
+  constructor(
+    message: string,
+    public statusCode: number,
+    public details?: any
+  ) {
+    super(message);
+    this.name = 'APIError';
+  }
+}
+
+async function handleResponse<T>(response: Response): Promise<T> {
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new APIError(
+      errorData.detail || errorData.error || 'API request failed',
+      response.status,
+      errorData
+    );
+  }
+  return response.json();
+}
+
+// ============================================================================
+// STAGE 1: REVIEW ENDPOINTS
+// ============================================================================
+
+export const reviewsAPI = {
+  /**
+   * Get all 30 questions for Stage 1 review
+   */
+  async getStage1Questions(videoId: string): Promise<Question[]> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/reviews/stage1/${videoId}`
+    );
+    return handleResponse<Question[]>(response);
+  },
+
+  /**
+   * Approve a single question
+   */
+  async approveQuestion(
+    questionId: number,
+    reviewer: string
+  ): Promise<ApproveQuestionResponse> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/reviews/stage1/approve/${questionId}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reviewer } as ApproveQuestionRequest),
+      }
+    );
+    return handleResponse<ApproveQuestionResponse>(response);
+  },
+
+  /**
+   * Reject a single question with feedback
+   */
+  async rejectQuestion(
+    questionId: number,
+    reviewer: string,
+    feedback: string
+  ): Promise<RejectQuestionResponse> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/reviews/stage1/reject/${questionId}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reviewer, feedback } as RejectQuestionRequest),
+      }
+    );
+    return handleResponse<RejectQuestionResponse>(response);
+  },
+
+  /**
+   * Approve multiple questions at once
+   */
+  async bulkApprove(
+    questionIds: number[],
+    reviewer: string
+  ): Promise<{ success: boolean; approved_count: number }> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/reviews/stage1/bulk-approve`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question_ids: questionIds,
+          reviewer,
+        } as BulkReviewRequest),
+      }
+    );
+    return handleResponse(response);
+  },
+
+  /**
+   * Reject multiple questions at once
+   */
+  async bulkReject(
+    questionIds: number[],
+    reviewer: string,
+    feedback: string
+  ): Promise<{ success: boolean; rejected_count: number }> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/reviews/stage1/bulk-reject`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question_ids: questionIds,
+          reviewer,
+          feedback,
+        } as BulkReviewRequest),
+      }
+    );
+    return handleResponse(response);
+  },
+
+  /**
+   * Trigger regeneration of rejected question
+   */
+  async regenerateQuestion(
+    questionId: number,
+    reviewer: string
+  ): Promise<RegenerateQuestionResponse> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/reviews/stage1/regenerate/${questionId}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reviewer } as RegenerateQuestionRequest),
+      }
+    );
+    return handleResponse<RegenerateQuestionResponse>(response);
+  },
+
+  /**
+   * Get Stage 1 review progress
+   */
+  async getStage1Progress(videoId: string): Promise<ReviewProgress> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/reviews/stage1/progress/${videoId}`
+    );
+    return handleResponse<ReviewProgress>(response);
+  },
+
+  // ============================================================================
+  // STAGE 2: SELECTION ENDPOINTS
+  // ============================================================================
+
+  /**
+   * Get all Gemini failures ranked by score
+   */
+  async getStage2Failures(videoId: string): Promise<GeminiFailure[]> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/reviews/stage2/${videoId}`
+    );
+    return handleResponse<GeminiFailure[]>(response);
+  },
+
+  /**
+   * Submit final 4 question selection
+   */
+  async submitStage2Selection(
+    selectedQuestionIds: number[],
+    reviewer: string
+  ): Promise<Stage2SelectionResponse> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/reviews/stage2/select`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          selected_question_ids: selectedQuestionIds,
+          reviewer,
+        } as Stage2SelectionRequest),
+      }
+    );
+    return handleResponse<Stage2SelectionResponse>(response);
+  },
+
+  // ============================================================================
+  // STATUS ENDPOINT
+  // ============================================================================
+
+  /**
+   * Get current review status for video
+   */
+  async getReviewStatus(videoId: string): Promise<VideoStatus> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/reviews/status/${videoId}`
+    );
+    return handleResponse<VideoStatus>(response);
+  },
+};
+
+// ============================================================================
+// EXPORT
+// ============================================================================
+
+export default reviewsAPI;
+export { APIError };
