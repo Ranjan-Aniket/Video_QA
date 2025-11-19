@@ -1241,73 +1241,121 @@ EXAMPLES OF BAD ANSWERS (DO NOT DO THIS):
             return "basketball game in progress"
 
     def _extract_answer_components(self, description: str, pattern_type: str) -> Dict:
-        """Extract specific answer components based on question pattern
+        """Extract specific answer components from AI description (JSON or text)
 
+        Tries to parse JSON first, falls back to text parsing
         Returns dict with specific answers (NOT full AI description dump)
-        Example: {'action': 'Player shooting', 'score': 'WSH 52, TOR 57'}
         """
         import re
+        import json
 
         components = {}
+
+        # Try to parse as JSON first (new structured format)
+        try:
+            # Check if description is JSON
+            if description.strip().startswith('{'):
+                data = json.loads(description)
+
+                # Extract from structured JSON
+                players = data.get('players', [])
+                on_screen = data.get('on_screen_text', {})
+                scene = data.get('scene', {})
+
+                # Action from first player
+                if players and len(players) > 0:
+                    player = players[0]
+                    action = player.get('action', 'in play')
+                    components['action'] = f"Player {action}"
+                    components['player_action'] = f"{action.capitalize()}"
+                else:
+                    components['action'] = "Players in active play"
+                    components['player_action'] = "Moving on court"
+
+                # Game state
+                components['game_state'] = f"Basketball game - {scene.get('type', 'game in progress')}"
+
+                # Counting
+                components['count_target'] = "players"
+                components['count_answer'] = f"{len(players)} players visible"
+
+                # Jersey colors
+                jersey_colors = list(set([p.get('jersey_color', '') for p in players if p.get('jersey_color')]))
+                if jersey_colors:
+                    components['jersey_colors'] = " and ".join(jersey_colors) + " jerseys"
+                else:
+                    components['jersey_colors'] = "Multiple jersey colors"
+
+                # On-screen text
+                score = on_screen.get('score', '')
+                if score:
+                    components['on_screen_text'] = f"Score: {score}"
+                    components['score'] = score
+                else:
+                    components['on_screen_text'] = "On-screen graphics visible"
+                    components['score'] = "Score displayed"
+
+                # Teams (extract from score)
+                if score and ',' in score:
+                    teams = re.findall(r'([A-Z]{2,4})', score)
+                    if len(teams) >= 2:
+                        components['teams'] = f"{teams[0]} vs {teams[1]}"
+                    else:
+                        components['teams'] = "Two teams competing"
+                else:
+                    components['teams'] = "Two teams competing"
+
+                # Arena branding
+                branding = scene.get('branding', [])
+                if branding and len(branding) > 0:
+                    components['arena_branding'] = f"{branding[0]} branding visible"
+                else:
+                    components['arena_branding'] = "Arena advertisements visible"
+
+                return components
+
+        except (json.JSONDecodeError, KeyError, TypeError):
+            # Fall back to text parsing for old-format descriptions
+            pass
+
+        # Fallback: Text parsing (for compatibility with old descriptions)
         desc_lower = description.lower()
 
         # Extract action
         if "dribbling" in desc_lower:
-            components['action'] = "A player is dribbling the basketball"
+            components['action'] = "Player dribbling the basketball"
         elif "shooting" in desc_lower:
-            components['action'] = "A player is shooting"
+            components['action'] = "Player shooting"
         elif "passing" in desc_lower:
-            components['action'] = "A player is passing the ball"
+            components['action'] = "Player passing the ball"
         else:
-            components['action'] = "Players are in active play"
+            components['action'] = "Players in active play"
 
-        # Extract game state
-        components['game_state'] = "A basketball game is in progress"
-        if "offense" in desc_lower or "defensive" in desc_lower:
-            components['game_state'] = "Teams are in offensive/defensive positions"
-
-        # Extract count target and answer
-        player_count = desc_lower.count("player")
+        components['game_state'] = "Basketball game in progress"
         components['count_target'] = "players"
-        components['count_answer'] = f"Multiple players ({player_count} mentioned in description)"
+        components['count_answer'] = "Multiple players visible"
 
-        # Extract jersey colors
+        # Jersey colors
         jerseys = []
         if "white" in desc_lower and "jersey" in desc_lower:
             jerseys.append("white")
         if "dark" in desc_lower or "black" in desc_lower:
             if "jersey" in desc_lower:
-                jerseys.append("dark/black")
-        components['jersey_colors'] = " and ".join(jerseys) + " jerseys" if jerseys else "Multiple jersey colors"
+                jerseys.append("dark")
+        components['jersey_colors'] = " and ".join(jerseys) + " jerseys" if jerseys else "Multiple jerseys"
 
-        # Extract on-screen text (look for patterns like "WSH 52")
+        # Score
         score_match = re.search(r'([A-Z]{2,4})\s+(\d+)', description)
         if score_match:
-            components['on_screen_text'] = f"Score display showing {score_match.group(1)} {score_match.group(2)}"
+            components['on_screen_text'] = f"Score: {score_match.group(1)} {score_match.group(2)}"
             components['score'] = f"{score_match.group(1)} {score_match.group(2)}"
         else:
-            components['on_screen_text'] = "On-screen graphics visible"
-            components['score'] = "Score displayed on screen"
+            components['on_screen_text'] = "On-screen graphics"
+            components['score'] = "Score visible"
 
-        # Extract player action
-        if "ball" in desc_lower:
-            components['player_action'] = "Handling/controlling the basketball"
-        else:
-            components['player_action'] = "Moving on court"
-
-        # Extract teams (look for team abbreviations like WSH, TOR)
-        team_match = re.findall(r'\b([A-Z]{2,4})\b', description)
-        if team_match and len(team_match) >= 2:
-            components['teams'] = f"{team_match[0]} vs {team_match[1]}"
-        else:
-            components['teams'] = "Two teams competing"
-
-        # Extract arena branding
-        arena_match = re.search(r'(Scotiabank|FanDuel|Bell|PlayStation)', description, re.IGNORECASE)
-        if arena_match:
-            components['arena_branding'] = f"{arena_match.group(1)} branding visible"
-        else:
-            components['arena_branding'] = "Arena advertisements visible around court"
+        components['player_action'] = "Handling basketball" if "ball" in desc_lower else "Moving on court"
+        components['teams'] = "Two teams competing"
+        components['arena_branding'] = "Arena advertisements visible"
 
         return components
 

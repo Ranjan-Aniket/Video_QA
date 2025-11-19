@@ -806,7 +806,36 @@ class AdversarialSmartPipeline:
                         "content": [
                             {
                                 "type": "text",
-                                "text": "Analyze this video frame. List: 1) All visible objects/people with descriptors (clothing, position), 2) Any visible text, 3) Scene type/setting. Be specific and detailed."
+                                "text": """Analyze this basketball video frame and return STRUCTURED JSON (nothing else).
+
+CRITICAL: Use descriptors ONLY, NO NAMES. Replace player names with descriptors like "player in white jersey #13".
+
+Return this EXACT JSON structure:
+{
+  "players": [
+    {"jersey_color": "white", "jersey_number": "13", "position": "near three-point line", "action": "dribbling basketball"},
+    {"jersey_color": "dark", "jersey_number": "8", "position": "center court", "action": "defending"}
+  ],
+  "on_screen_text": {
+    "score": "WSH 52, TOR 57",
+    "game_clock": "2nd 4:54",
+    "shot_clock": "24",
+    "other_text": ["TSN", "Scotiabank Arena"]
+  },
+  "scene": {
+    "type": "basketball game",
+    "location": "indoor arena",
+    "court_features": ["red painted key", "three-point line visible"],
+    "branding": ["Scotiabank", "FanDuel", "Bell"]
+  },
+  "officials": [
+    {"uniform": "gray shirt #83", "position": "near center court"}
+  ],
+  "crowd": "packed arena, multiple levels visible",
+  "key_action": "active play in progress"
+}
+
+Return ONLY valid JSON, no markdown, no extra text."""
                             },
                             {
                                 "type": "image_url",
@@ -889,7 +918,36 @@ class AdversarialSmartPipeline:
                             },
                             {
                                 "type": "text",
-                                "text": "Analyze this video frame. List: 1) All visible objects/people with descriptors (clothing, position), 2) Any visible text, 3) Scene type/setting. Be specific and detailed."
+                                "text": """Analyze this basketball video frame and return STRUCTURED JSON (nothing else).
+
+CRITICAL: Use descriptors ONLY, NO NAMES. Replace player names with descriptors like "player in white jersey #13".
+
+Return this EXACT JSON structure:
+{
+  "players": [
+    {"jersey_color": "white", "jersey_number": "13", "position": "near three-point line", "action": "dribbling basketball"},
+    {"jersey_color": "dark", "jersey_number": "8", "position": "center court", "action": "defending"}
+  ],
+  "on_screen_text": {
+    "score": "WSH 52, TOR 57",
+    "game_clock": "2nd 4:54",
+    "shot_clock": "24",
+    "other_text": ["TSN", "Scotiabank Arena"]
+  },
+  "scene": {
+    "type": "basketball game",
+    "location": "indoor arena",
+    "court_features": ["red painted key", "three-point line visible"],
+    "branding": ["Scotiabank", "FanDuel", "Bell"]
+  },
+  "officials": [
+    {"uniform": "gray shirt #83", "position": "near center court"}
+  ],
+  "crowd": "packed arena, multiple levels visible",
+  "key_action": "active play in progress"
+}
+
+Return ONLY valid JSON, no markdown, no extra text."""
                             }
                         ]
                     }
