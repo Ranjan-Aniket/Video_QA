@@ -69,23 +69,35 @@ class BLIP2Processor:
             import torch
             from transformers import Blip2Processor, Blip2ForConditionalGeneration
 
-            # Load pre-trained BLIP-2 model
-            # self.processor = Blip2Processor.from_pretrained(self.model_name)
-            # self.model = Blip2ForConditionalGeneration.from_pretrained(
-            #     self.model_name,
-            #     torch_dtype=torch.float16 if self.device == "cuda" else torch.float32
-            # )
-            # self.model.to(self.device)
-            # self.model.eval()
+            logger.info(f"Loading BLIP-2 model {self.model_name}...")
+            logger.info("Note: This may take several minutes on first run (downloading ~15GB)")
 
-            logger.info("BLIP-2 Flan-T5-XL model loaded successfully")
+            # Load pre-trained BLIP-2 model
+            self.processor = Blip2Processor.from_pretrained(self.model_name)
+            self.model = Blip2ForConditionalGeneration.from_pretrained(
+                self.model_name,
+                torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+                device_map="auto" if self.device == "cuda" else None
+            )
+
+            if self.device != "cuda":
+                self.model.to(self.device)
+
+            self.model.eval()
+
+            logger.info("✓ BLIP-2 Flan-T5-XL model loaded successfully")
 
         except ImportError:
             logger.warning(
                 "BLIP-2 not installed. Install with: pip install transformers torch pillow"
             )
+            self.model = None
+            self.processor = None
         except Exception as e:
             logger.error(f"Failed to load BLIP-2 model: {e}")
+            logger.error("Falling back to simple description")
+            self.model = None
+            self.processor = None
 
     def generate_description(
         self,
@@ -96,13 +108,13 @@ class BLIP2Processor:
         Generate contextual description of frame
 
         Args:
-            frame: Frame image (HxWxC numpy array)
+            frame: Frame image (HxWxC numpy array, RGB format)
             prompt: Optional prompt to guide generation
 
         Returns:
             ContextualUnderstanding object
         """
-        if self.model is None:
+        if self.model is None or self.processor is None:
             return self._simple_description(frame)
 
         try:
@@ -113,24 +125,33 @@ class BLIP2Processor:
             pil_image = Image.fromarray(frame)
 
             # Process image
-            # inputs = self.processor(
-            #     images=pil_image,
-            #     text=prompt or "Describe this image in detail.",
-            #     return_tensors="pt"
-            # ).to(self.device)
+            inputs = self.processor(
+                images=pil_image,
+                text=prompt or "Describe this image in detail.",
+                return_tensors="pt"
+            ).to(self.device)
 
             # Generate description
-            # with torch.no_grad():
-            #     generated_ids = self.model.generate(**inputs, max_length=100)
-            #     description = self.processor.batch_decode(
-            #         generated_ids, skip_special_tokens=True
-            #     )[0]
+            with torch.no_grad():
+                generated_ids = self.model.generate(**inputs, max_length=100)
+                description = self.processor.batch_decode(
+                    generated_ids, skip_special_tokens=True
+                )[0]
 
-            # For now, fallback
-            return self._simple_description(frame)
+            logger.debug(f"BLIP-2 generated: {description[:100]}...")
+
+            # Parse description into components (basic parsing)
+            return ContextualUnderstanding(
+                description=description,
+                key_objects=[],  # Could parse from description
+                activities=[],   # Could parse from description
+                confidence=0.85  # BLIP-2 is generally confident
+            )
 
         except Exception as e:
-            logger.error(f"Description generation failed: {e}")
+            logger.error(f"BLIP-2 description generation failed: {e}")
+            import traceback
+            traceback.print_exc()
             return self._simple_description(frame)
 
     def _simple_description(self, frame: np.ndarray) -> ContextualUnderstanding:

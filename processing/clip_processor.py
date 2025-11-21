@@ -250,6 +250,50 @@ class CLIPProcessor:
         # For now, return empty list
         return []
 
+    def encode_image(self, frame: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Encode image to CLIP embedding vector
+
+        Args:
+            frame: Frame image (HxWxC numpy array, RGB format)
+
+        Returns:
+            Embedding vector as numpy array (typically 512 or 768 dimensions)
+            None if model not available
+        """
+        if self.model is None:
+            logger.warning("CLIP model not available for encoding")
+            return None
+
+        try:
+            import torch
+            from PIL import Image
+
+            # Convert numpy array to PIL Image
+            pil_image = Image.fromarray(frame)
+
+            # Preprocess image
+            image_tensor = self.preprocess(pil_image).unsqueeze(0).to(self.device)
+
+            # Encode image with CLIP
+            with torch.no_grad():
+                image_features = self.model.encode_image(image_tensor)
+
+                # Normalize features (standard for CLIP)
+                image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+
+                # Convert to numpy
+                embedding = image_features.cpu().numpy()[0]
+
+            logger.debug(f"CLIP encoded image to {embedding.shape[0]}-dimensional embedding")
+            return embedding
+
+        except Exception as e:
+            logger.error(f"CLIP image encoding failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
     def classify_visual_attributes(
         self,
         frame: np.ndarray,

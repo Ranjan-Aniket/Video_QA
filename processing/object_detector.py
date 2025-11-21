@@ -46,19 +46,19 @@ class BoundingBox:
     y1: int
     x2: int
     y2: int
-    
+
     @property
     def width(self) -> int:
         return self.x2 - self.x1
-    
+
     @property
     def height(self) -> int:
         return self.y2 - self.y1
-    
+
     @property
     def center(self) -> Tuple[float, float]:
         return ((self.x1 + self.x2) / 2, (self.y1 + self.y2) / 2)
-    
+
     @property
     def area(self) -> int:
         return self.width * self.height
@@ -71,17 +71,15 @@ class DetectedObject:
     confidence: float  # Detection confidence (0.0-1.0)
     bbox: BoundingBox  # Bounding box
     category: ObjectCategory  # Object category
-    
+
     # Optional attributes
     attributes: Dict[str, Any] = field(default_factory=dict)
     # For persons: clothing color, pose, action
     # For vehicles: type, color
     # For objects: material, state
-    
-    track_id: Optional[int] = None  # Multi-frame tracking ID
-    
+
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for storage"""
+        """Convert to dictionary"""
         return {
             "class_name": self.class_name,
             "confidence": self.confidence,
@@ -92,107 +90,127 @@ class DetectedObject:
                 "y2": self.bbox.y2
             },
             "category": self.category.value,
-            "attributes": self.attributes,
-            "track_id": self.track_id
+            "attributes": self.attributes
         }
 
 
 @dataclass
 class FrameDetectionResult:
-    """Detection result for a single frame"""
+    """Detection results for a single frame"""
     frame_index: int
     timestamp: float
     detections: List[DetectedObject]
-    
+
     @property
-    def detection_count(self) -> int:
-        """Total number of detections"""
+    def num_detections(self) -> int:
         return len(self.detections)
-    
-    @property
-    def person_count(self) -> int:
-        """Number of persons detected"""
-        return sum(
-            1 for d in self.detections 
-            if d.category == ObjectCategory.PERSON
-        )
-    
+
     @property
     def unique_classes(self) -> Set[str]:
-        """Set of unique object classes"""
-        return {d.class_name for d in self.detections}
-    
-    def get_detections_by_category(
-        self, category: ObjectCategory
-    ) -> List[DetectedObject]:
-        """Get all detections of specific category"""
-        return [d for d in self.detections if d.category == category]
+        return {obj.class_name for obj in self.detections}
+
+    @property
+    def has_person(self) -> bool:
+        return any(obj.category == ObjectCategory.PERSON for obj in self.detections)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary"""
+        return {
+            "frame_index": self.frame_index,
+            "timestamp": self.timestamp,
+            "num_detections": self.num_detections,
+            "detections": [obj.to_dict() for obj in self.detections]
+        }
 
 
 @dataclass
 class ObjectDetectionResult:
-    """Result of object detection across multiple frames"""
+    """Complete object detection results for a video"""
     video_id: str
     frame_results: List[FrameDetectionResult]
     total_detections: int
     unique_classes: Set[str]
     detection_cost: float
-    
-    @property
-    def frame_count(self) -> int:
-        """Number of frames processed"""
-        return len(self.frame_results)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary"""
+        return {
+            "video_id": self.video_id,
+            "total_frames": len(self.frame_results),
+            "total_detections": self.total_detections,
+            "unique_classes": list(self.unique_classes),
+            "detection_cost": self.detection_cost,
+            "frames": [frame.to_dict() for frame in self.frame_results]
+        }
 
 
 class ObjectDetector:
     """
-    Detect objects, people, and actions in video frames.
-    
-    Uses YOLO v8 (or similar) for efficient local detection.
-    Optimized for cost-effective JIT processing.
+    Object detector using YOLO for video frame analysis.
+
+    Features:
+    - Lazy loading (model loaded on first use)
+    - GPU/CPU support
+    - Batch processing for efficiency
+    - Person attribute extraction
     """
-    
+
     def __init__(
         self,
-        model_name: str = "yolov8x",  # YOLOv8x (131MB) - 90% accuracy
-        confidence_threshold: float = 0.5,
-        device: str = "cpu",  # or "cuda" for GPU
-        enable_tracking: bool = False
+        model_name: str = "yolov8n",
+        confidence_threshold: float = 0.25,
+        device: str = "cpu"
     ):
         """
         Initialize object detector.
-        
+
         Args:
-            model_name: YOLO model variant (n/s/m/l/x)
-            confidence_threshold: Minimum detection confidence
-            device: Device for inference (cpu/cuda)
-            enable_tracking: Enable multi-frame object tracking
+            model_name: YOLO model name (yolov8n, yolov8s, yolov8m, etc.)
+            confidence_threshold: Minimum confidence for detections (0.0-1.0)
+            device: Device to run on ('cpu' or 'cuda')
         """
         self.model_name = model_name
         self.confidence_threshold = confidence_threshold
         self.device = device
-        self.enable_tracking = enable_tracking
-        
-        # Initialize model
-        self.model = None
-        self._init_model()
-        
+        self.model = None  # Lazy loading
+
         logger.info(
-            f"ObjectDetector initialized (model: {model_name}, "
-            f"device: {device}, tracking: {enable_tracking})"
+            f"ObjectDetector initialized "
+            f"(model={model_name}, conf={confidence_threshold}, device={device})"
         )
-    
+
     def _init_model(self):
         """Initialize YOLO model (lazy loading)"""
+        if self.model is not None:
+            return  # Already initialized
+
         try:
-            # TODO: Implement with Ultralytics YOLO
-            # from ultralytics import YOLO
-            # self.model = YOLO(f"{self.model_name}.pt")
-            # self.model.to(self.device)
-            logger.info(f"YOLO model {self.model_name} initialized")
+            from ultralytics import YOLO
+
+            logger.info(f"Loading YOLO model {self.model_name}...")
+            self.model = YOLO(f"{self.model_name}.pt")
+
+            # Move to specified device
+            if self.device == "cuda":
+                import torch
+                if torch.cuda.is_available():
+                    self.model.to(self.device)
+                    logger.info(f"YOLO model loaded on GPU")
+                else:
+                    logger.warning("CUDA requested but not available, using CPU")
+                    self.device = "cpu"
+            else:
+                logger.info(f"YOLO model loaded on CPU")
+
+            logger.info(f"YOLO model {self.model_name} initialized successfully")
+
         except ImportError:
-            logger.warning("YOLO not available, will use placeholder")
-    
+            logger.error("Ultralytics YOLO not installed. Install with: pip install ultralytics")
+            self.model = None
+        except Exception as e:
+            logger.error(f"Failed to initialize YOLO model: {e}")
+            self.model = None
+
     def detect_objects_in_frames(
         self,
         frames: List[np.ndarray],
@@ -201,39 +219,39 @@ class ObjectDetector:
     ) -> ObjectDetectionResult:
         """
         Detect objects in multiple frames.
-        
+
         Args:
             frames: List of frame images (HxWxC numpy arrays)
             timestamps: Timestamp for each frame
             video_id: Unique video identifier
-        
+
         Returns:
             ObjectDetectionResult with all detections
         """
         logger.info(f"Detecting objects in {len(frames)} frames")
-        
+
         frame_results = []
         all_unique_classes = set()
         total_detections = 0
         detection_cost = 0.0
-        
+
         for i, (frame, timestamp) in enumerate(zip(frames, timestamps)):
             # Detect objects in single frame
             detections = self._detect_in_frame(frame)
-            
+
             result = FrameDetectionResult(
                 frame_index=i,
                 timestamp=timestamp,
                 detections=detections
             )
-            
+
             frame_results.append(result)
             all_unique_classes.update(result.unique_classes)
             total_detections += len(detections)
-            
+
             # Calculate cost (GPU compute)
             detection_cost += 0.002  # ~$0.002 per frame
-        
+
         detection_result = ObjectDetectionResult(
             video_id=video_id,
             frame_results=frame_results,
@@ -241,98 +259,122 @@ class ObjectDetector:
             unique_classes=all_unique_classes,
             detection_cost=detection_cost
         )
-        
+
         logger.info(
             f"Detected {total_detections} objects, "
             f"{len(all_unique_classes)} unique classes "
             f"(cost: ${detection_cost:.4f})"
         )
-        
+
         return detection_result
-    
+
     def detect_objects_jit(
         self, frame: np.ndarray, timestamp: float
     ) -> FrameDetectionResult:
         """
         Detect objects in single frame on-demand (JIT).
-        
+
         This is the most cost-effective method for question-specific detection.
-        
+
         Args:
             frame: Frame image (HxWxC numpy array)
             timestamp: Frame timestamp in video
-        
+
         Returns:
             FrameDetectionResult with detections
         """
         detections = self._detect_in_frame(frame)
-        
+
         return FrameDetectionResult(
             frame_index=-1,  # Unknown frame index for JIT
             timestamp=timestamp,
             detections=detections
         )
-    
-    def _detect_in_frame(
-        self, frame: np.ndarray
-    ) -> List[DetectedObject]:
+
+    def _detect_in_frame(self, frame: np.ndarray) -> List[DetectedObject]:
         """
         Detect objects in single frame using YOLO.
-        
+
         Args:
             frame: Frame image (HxWxC numpy array, RGB format)
-        
+
         Returns:
             List of detected objects
         """
-        # TODO: Implement with YOLO
-        # if self.model is None:
-        #     self._init_model()
-        # 
-        # if self.model is None:
-        #     return []
-        # 
-        # # Run inference
-        # results = self.model(frame, conf=self.confidence_threshold)
-        # 
-        # # Parse detections
-        # detections = []
-        # for r in results:
-        #     boxes = r.boxes
-        #     for box in boxes:
-        #         # Get box coordinates
-        #         x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-        #         
-        #         # Get class and confidence
-        #         cls = int(box.cls[0].cpu().numpy())
-        #         conf = float(box.conf[0].cpu().numpy())
-        #         class_name = r.names[cls]
-        #         
-        #         # Categorize object
-        #         category = self._categorize_object(class_name)
-        #         
-        #         # Extract attributes (if person)
-        #         attributes = {}
-        #         if category == ObjectCategory.PERSON:
-        #             attributes = self._extract_person_attributes(frame, x1, y1, x2, y2)
-        #         
-        #         detections.append(DetectedObject(
-        #             class_name=class_name,
-        #             confidence=conf,
-        #             bbox=BoundingBox(int(x1), int(y1), int(x2), int(y2)),
-        #             category=category,
-        #             attributes=attributes
-        #         ))
-        # 
-        # return detections
-        
-        logger.warning("_detect_in_frame not implemented - placeholder")
-        return []
-    
+        # Initialize model if needed
+        if self.model is None:
+            self._init_model()
+
+        if self.model is None:
+            logger.warning("YOLO model not available, returning empty detections")
+            return []
+
+        try:
+            # Run YOLO inference
+            results = self.model(
+                frame,
+                conf=self.confidence_threshold,
+                verbose=False  # Suppress YOLO console output
+            )
+
+            # Parse detections
+            detections = []
+
+            if len(results) > 0:
+                result = results[0]  # First result (single frame)
+
+                if result.boxes is not None and len(result.boxes) > 0:
+                    boxes = result.boxes
+
+                    for box in boxes:
+                        # Get box coordinates (xyxy format)
+                        xyxy = box.xyxy[0].cpu().numpy()
+                        x1, y1, x2, y2 = xyxy
+
+                        # Get class and confidence
+                        cls = int(box.cls[0].cpu().numpy())
+                        conf = float(box.conf[0].cpu().numpy())
+                        class_name = result.names[cls]
+
+                        # Categorize object
+                        category = self._categorize_object(class_name)
+
+                        # Extract attributes (if person)
+                        attributes = {}
+                        if category == ObjectCategory.PERSON:
+                            attributes = self._extract_person_attributes(
+                                frame, int(x1), int(y1), int(x2), int(y2)
+                            )
+
+                        # Create DetectedObject
+                        detection = DetectedObject(
+                            class_name=class_name,
+                            confidence=conf,
+                            bbox=BoundingBox(
+                                x1=int(x1),
+                                y1=int(y1),
+                                x2=int(x2),
+                                y2=int(y2)
+                            ),
+                            category=category,
+                            attributes=attributes
+                        )
+
+                        detections.append(detection)
+
+            logger.debug(f"Detected {len(detections)} objects in frame")
+            return detections
+
+        except Exception as e:
+            logger.error(f"Error during object detection: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+
     def _categorize_object(self, class_name: str) -> ObjectCategory:
         """Categorize detected object into high-level category"""
         class_name_lower = class_name.lower()
-        
+
         if class_name_lower == "person":
             return ObjectCategory.PERSON
         elif class_name_lower in ["car", "truck", "bus", "motorcycle", "bicycle"]:
@@ -345,181 +387,125 @@ class ObjectDetector:
             return ObjectCategory.FOOD
         elif class_name_lower in ["laptop", "phone", "tv", "keyboard"]:
             return ObjectCategory.ELECTRONICS
-        elif class_name_lower in ["ball", "racket", "skateboard"]:
+        elif class_name_lower in ["ball", "racket", "skateboard", "sports ball"]:
             return ObjectCategory.SPORTS
         else:
             return ObjectCategory.OTHER
-    
+
     def _extract_person_attributes(
         self, frame: np.ndarray, x1: int, y1: int, x2: int, y2: int
     ) -> Dict[str, Any]:
         """
         Extract attributes for detected person.
-        
+
         Attributes include:
         - Clothing color (top, bottom)
         - Pose (standing, sitting, etc.)
         - Action (walking, running, etc.)
-        
+
         Args:
             frame: Full frame image
             x1, y1, x2, y2: Person bounding box
-        
+
         Returns:
             Dictionary of extracted attributes
         """
-        # TODO: Implement person attribute extraction
-        # - Use color histogram for clothing color
-        # - Use pose estimation for posture
-        # - Use action recognition model for actions
-        
+        # TODO: Implement advanced person attribute extraction
+        # For now, return basic attributes
+
         attributes = {
-            "top_color": "unknown",
-            "bottom_color": "unknown",
-            "pose": "unknown",
-            "action": "unknown"
+            "bbox_area": (x2 - x1) * (y2 - y1),
+            "position": {
+                "x": int((x1 + x2) / 2),
+                "y": int((y1 + y2) / 2)
+            }
         }
-        
-        # Extract person crop
-        person_crop = frame[y1:y2, x1:x2]
-        
-        # Simple color detection (top half = shirt, bottom half = pants)
-        if person_crop.shape[0] > 0 and person_crop.shape[1] > 0:
-            height = person_crop.shape[0]
-            
-            # Top clothing (upper 40%)
-            top_crop = person_crop[:int(height * 0.4), :]
-            attributes["top_color"] = self._detect_dominant_color(top_crop)
-            
-            # Bottom clothing (middle 40-80%)
-            bottom_crop = person_crop[int(height * 0.4):int(height * 0.8), :]
-            attributes["bottom_color"] = self._detect_dominant_color(bottom_crop)
-        
+
+        # Could add:
+        # - Dominant clothing colors (using color quantization)
+        # - Pose estimation (using MediaPipe or similar)
+        # - Action recognition (using temporal analysis)
+
         return attributes
-    
-    def _detect_dominant_color(self, image_crop: np.ndarray) -> str:
-        """
-        Detect dominant color in image crop.
-        
-        Returns color name (red, blue, green, etc.)
-        """
-        if image_crop.size == 0:
-            return "unknown"
-        
-        # Calculate average RGB
-        avg_color = image_crop.mean(axis=(0, 1))
-        r, g, b = avg_color
-        
-        # Simple color classification
-        if r > 150 and g < 100 and b < 100:
-            return "red"
-        elif r < 100 and g > 150 and b < 100:
-            return "green"
-        elif r < 100 and g < 100 and b > 150:
-            return "blue"
-        elif r > 150 and g > 150 and b < 100:
-            return "yellow"
-        elif r < 80 and g < 80 and b < 80:
-            return "black"
-        elif r > 200 and g > 200 and b > 200:
-            return "white"
-        else:
-            return "other"
-    
-    def filter_detections(
-        self,
-        detections: List[DetectedObject],
-        min_confidence: float = 0.5,
-        categories: Optional[List[ObjectCategory]] = None,
-        min_size: Optional[int] = None
-    ) -> List[DetectedObject]:
-        """
-        Filter detections by confidence, category, and size.
-        
-        Args:
-            detections: List of detections to filter
-            min_confidence: Minimum confidence threshold
-            categories: Optional list of categories to keep
-            min_size: Minimum bounding box area
-        
-        Returns:
-            Filtered list of detections
-        """
-        filtered = detections
-        
-        # Filter by confidence
-        filtered = [d for d in filtered if d.confidence >= min_confidence]
-        
-        # Filter by category
-        if categories:
-            filtered = [d for d in filtered if d.category in categories]
-        
-        # Filter by size
-        if min_size:
-            filtered = [d for d in filtered if d.bbox.area >= min_size]
-        
-        logger.debug(
-            f"Filtered {len(detections)} detections to {len(filtered)}"
-        )
-        
-        return filtered
-    
-    def track_objects(
-        self,
-        frame_results: List[FrameDetectionResult]
-    ) -> List[FrameDetectionResult]:
-        """
-        Track objects across multiple frames.
-        
-        Assigns consistent track_id to same object across frames.
-        
-        Args:
-            frame_results: List of frame detection results
-        
-        Returns:
-            Same results with track_id assigned
-        """
-        # TODO: Implement object tracking
-        # Use IoU-based tracking or DeepSORT
-        
-        logger.warning("Object tracking not implemented - placeholder")
-        return frame_results
 
+    def _detect_in_frames_batch(
+        self,
+        frames: List[np.ndarray],
+        batch_size: int = 8
+    ) -> List[List[DetectedObject]]:
+        """
+        Detect objects in multiple frames with batching for better performance.
 
-# Example usage
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    
-    # Initialize detector
-    detector = ObjectDetector(
-        model_name="yolov8n",
-        confidence_threshold=0.5,
-        device="cpu",
-        enable_tracking=False
-    )
-    
-    # Example 1: JIT single frame detection (recommended)
-    # frame = np.random.randint(0, 255, (720, 1280, 3), dtype=np.uint8)
-    # result = detector.detect_objects_jit(frame, timestamp=10.5)
-    # 
-    # print(f"✓ Detected objects in frame at 10.5s:")
-    # print(f"  Total: {result.detection_count}")
-    # print(f"  Persons: {result.person_count}")
-    # print(f"  Classes: {result.unique_classes}")
-    
-    # Example 2: Batch frame detection
-    # frames = [np.random.randint(0, 255, (720, 1280, 3), dtype=np.uint8) for _ in range(5)]
-    # timestamps = [5.0, 10.0, 15.0, 20.0, 25.0]
-    # 
-    # result = detector.detect_objects_in_frames(
-    #     frames=frames,
-    #     timestamps=timestamps,
-    #     video_id="vid_abc123"
-    # )
-    # 
-    # print(f"\n✓ Detected objects in {result.frame_count} frames")
-    # print(f"  Total detections: {result.total_detections}")
-    # print(f"  Unique classes: {len(result.unique_classes)}")
-    # print(f"  Cost: ${result.detection_cost:.4f}")
-    
-    print("Object detector ready (implementation pending)")
+        Args:
+            frames: List of frame images
+            batch_size: Number of frames to process in parallel
+
+        Returns:
+            List of detection lists (one per frame)
+        """
+        if self.model is None:
+            self._init_model()
+
+        if self.model is None:
+            return [[] for _ in frames]
+
+        all_detections = []
+
+        # Process in batches
+        for i in range(0, len(frames), batch_size):
+            batch = frames[i:i+batch_size]
+
+            try:
+                # YOLO can process batches efficiently
+                results = self.model(
+                    batch,
+                    conf=self.confidence_threshold,
+                    verbose=False
+                )
+
+                # Parse each frame's results
+                for j, result in enumerate(results):
+                    frame_idx = i + j
+                    frame = batch[j]
+                    frame_detections = []
+
+                    if result.boxes is not None and len(result.boxes) > 0:
+                        boxes = result.boxes
+
+                        for box in boxes:
+                            xyxy = box.xyxy[0].cpu().numpy()
+                            x1, y1, x2, y2 = xyxy
+
+                            cls = int(box.cls[0].cpu().numpy())
+                            conf = float(box.conf[0].cpu().numpy())
+                            class_name = result.names[cls]
+
+                            category = self._categorize_object(class_name)
+
+                            attributes = {}
+                            if category == ObjectCategory.PERSON:
+                                attributes = self._extract_person_attributes(
+                                    frame, int(x1), int(y1), int(x2), int(y2)
+                                )
+
+                            detection = DetectedObject(
+                                class_name=class_name,
+                                confidence=conf,
+                                bbox=BoundingBox(
+                                    x1=int(x1), y1=int(y1),
+                                    x2=int(x2), y2=int(y2)
+                                ),
+                                category=category,
+                                attributes=attributes
+                            )
+
+                            frame_detections.append(detection)
+
+                    all_detections.append(frame_detections)
+
+            except Exception as e:
+                logger.error(f"Error in batch detection: {e}")
+                # Add empty results for this batch
+                all_detections.extend([[] for _ in batch])
+
+        return all_detections

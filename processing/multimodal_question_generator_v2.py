@@ -28,8 +28,14 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Set
 from dataclasses import dataclass, field, asdict
 import os
-import openai
+from openai import OpenAI
 from anthropic import Anthropic
+
+# Import validation module
+from validation.generalized_name_replacer import GeneralizedNameReplacer
+from validation.complete_guidelines_validator import CompleteGuidelinesValidator
+from validation.question_type_classifier import QuestionTypeClassifier
+from validation.answer_guidelines_enforcer import AnswerGuidelinesEnforcer
 
 logger = logging.getLogger(__name__)
 
@@ -195,17 +201,34 @@ class AIDescriptionParser:
     @staticmethod
     def _calculate_position_from_bbox(bbox: List[float]) -> str:
         """Calculate position descriptor from bbox"""
-        if not bbox or len(bbox) < 4:
+        # Handle None or non-list types
+        if not bbox:
             return "center"
-        
-        x, y, w, h = bbox
-        center_x = x + w / 2
-        
-        if center_x < 0.33:
-            return "left"
-        elif center_x > 0.66:
-            return "right"
-        else:
+
+        # Handle dict type (shouldn't happen, but be defensive)
+        if isinstance(bbox, dict):
+            return "center"
+
+        # Ensure it's a list or tuple
+        if not isinstance(bbox, (list, tuple)):
+            return "center"
+
+        if len(bbox) < 4:
+            return "center"
+
+        # Convert to float in case they're strings
+        try:
+            x, y, w, h = [float(v) if isinstance(v, (str, int, float)) else 0.0 for v in bbox[:4]]
+            center_x = x + w / 2
+
+            if center_x < 0.33:
+                return "left"
+            elif center_x > 0.66:
+                return "right"
+            else:
+                return "center"
+        except (TypeError, ValueError) as e:
+            # Fallback if conversion fails
             return "center"
     
     @staticmethod
@@ -290,9 +313,24 @@ class Phase4EvidenceConverter:
             
             for yolo_obj in yolo_objects:
                 obj_class = yolo_obj.get("class", "unknown")
-                bbox = yolo_obj.get("bbox", [0, 0, 0, 0])
+                bbox_raw = yolo_obj.get("bbox", [0, 0, 0, 0])
+
+                # Ensure bbox is a list (handle dict, tuple, or other types)
+                if isinstance(bbox_raw, dict):
+                    # If bbox is a dict, try to extract x, y, w, h
+                    bbox = [
+                        bbox_raw.get('x', 0),
+                        bbox_raw.get('y', 0),
+                        bbox_raw.get('w', 0),
+                        bbox_raw.get('h', 0)
+                    ]
+                elif isinstance(bbox_raw, (list, tuple)) and len(bbox_raw) >= 4:
+                    bbox = list(bbox_raw[:4])
+                else:
+                    bbox = [0, 0, 0, 0]
+
                 confidence = yolo_obj.get("confidence", 0.0)
-                
+
                 if obj_class == "person":
                     # Extract person attributes from AI description
                     attributes = AIDescriptionParser.parse_person_attributes(
@@ -734,18 +772,27 @@ class Phase4EvidenceConverter:
         """Get natural language location from OCR bbox"""
         if not bbox or len(bbox) < 4:
             return "screen"
-        
+
         # OCR bbox format is typically [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-        if isinstance(bbox[0], list):
-            # Get center
-            xs = [pt[0] for pt in bbox]
-            ys = [pt[1] for pt in bbox]
-            center_x = sum(xs) / len(xs)
-            center_y = sum(ys) / len(ys)
+        # or [(x1,y1), (x2,y2), (x3,y3), (x4,y4)] (tuples instead of lists)
+        if isinstance(bbox[0], (list, tuple)):
+            # Polygon format - get center from all points
+            try:
+                xs = [pt[0] for pt in bbox]
+                ys = [pt[1] for pt in bbox]
+                center_x = sum(xs) / len(xs)
+                center_y = sum(ys) / len(ys)
+            except (TypeError, IndexError):
+                # Fallback if points are malformed
+                return "screen"
         else:
             # Standard [x, y, w, h] format
-            center_x = bbox[0] + bbox[2] / 2
-            center_y = bbox[1] + bbox[3] / 2
+            try:
+                center_x = bbox[0] + bbox[2] / 2
+                center_y = bbox[1] + bbox[3] / 2
+            except TypeError:
+                # Fallback if values are wrong type
+                return "screen"
         
         # Determine location
         h_pos = "left" if center_x < 0.33 else ("right" if center_x > 0.66 else "center")
@@ -848,8 +895,8 @@ class AIQuestionGenerator:
     def __init__(self, openai_api_key: str, claude_api_key: Optional[str] = None):
         self.openai_api_key = openai_api_key
         self.claude_api_key = claude_api_key
-        openai.api_key = openai_api_key
-        
+        self.openai_client = OpenAI(api_key=openai_api_key)
+
         if claude_api_key:
             self.claude_client = Anthropic(api_key=claude_api_key)
         else:
@@ -931,7 +978,289 @@ class AIQuestionGenerator:
         
         logger.info(f"   Generated {len(questions)} Claude questions")
         return questions
-    
+
+    def _build_task_specific_prompt(
+        self,
+        task_type: str,
+        audio_cue: str,
+        visual_desc: str,
+        timestamp: float
+    ) -> str:
+        """Build guideline-compliant prompts for each task type"""
+
+        # Base rules that apply to ALL task types
+        base_rules = """
+CRITICAL RULES (ZERO TOLERANCE - MUST FOLLOW ALL):
+
+QUESTION RULES:
+1. Question MUST require BOTH audio AND visual to answer - if answerable with just one → REJECT
+2. NO NAMES EVER: No person names, team names, companies, movies, songs, books
+   - Use descriptors: "player in white #10", "individual wearing red hat", "lead character"
+3. NO PRONOUNS: Never use he/she/him/her/they/them/their
+   - Always: "the player", "the individual", "the person wearing blue"
+7. Use DIVERSE question patterns (not just "when you hear X what do you see")
+
+ANSWER RULES (CRITICAL):
+4. Answer MUST be 1-2 sentences ONLY - no more, no less. Be CONCISE and SPECIFIC.
+5. Transcribe audio quotes EXACTLY as spoken in the video - no paraphrasing
+6. Visual details must be ACCURATE - don't say "blue" if it's "black"
+8. NO PRONOUNS IN ANSWER: Use "the player", not "he" or "they"
+9. NO FILLER: No "um", "uh", "like", "basically", "literally", "I think"
+10. Complete sentences only - no fragments like "Very quickly" or "After which"
+"""
+
+        # Task-specific instructions
+        task_prompts = {
+            'temporal': f"""
+TASK: TEMPORAL UNDERSTANDING - What happens before/after audio cue
+
+AUDIO CUE: {audio_cue}
+VISUAL CONTEXT: {visual_desc}
+
+PATTERN OPTIONS (choose ONE - must be precise with NO vague words like "someone"):
+1. "What visual action happens before the audio cue '{audio_cue[:30]}...' occurs?"
+2. "What does the individual in [descriptor] do after saying '{audio_cue[:30]}...'?"
+3. "What is happening in the visual when the audio says '{audio_cue[:30]}...'?"
+
+REQUIREMENTS:
+- MUST use specific descriptors (the player, the person, the individual), NEVER "someone"
+- Must reference a visual action/event that happens before OR after the audio
+- Answer must describe the visual action (NOT just repeat audio)
+- Timing is critical: "before" means BEFORE, "after" means AFTER
+- Audio must be diverse: if using speech, describe emotion/emphasis/tone OR use non-speech audio
+
+GOOD EXAMPLE:
+Q: "What visual action happens before the announcer says 'incredible defense'?"
+A: "The player in blue blocks the opponent's shot."
+
+BAD EXAMPLES:
+- "What does someone do?" (vague "someone" word - REJECT)
+- "When is 'great shot' said?" (timestamp question - FORBIDDEN)
+- "What happens?" (too vague - need specific visual reference)
+""",
+
+            'sequential': f"""
+TASK: SEQUENTIAL - Order of events combining audio and visual
+
+AUDIO CUE: {audio_cue}
+VISUAL CONTEXT: {visual_desc}
+
+PATTERN OPTIONS (NO "someone" - use specific descriptors):
+1. "What is the order? (A) [visual event] (B) Audio: '{audio_cue[:20]}...' (C) [visual event]"
+2. "Which happens first: the individual performing [action] or the audio cue '{audio_cue[:20]}...'?"
+3. "What sequence of events occurs? (A) [action] → (B) [{audio_cue[:15]}...] → (C) [action]"
+
+REQUIREMENTS:
+- Question must involve 2-3 events mixing audio and visual
+- Use specific descriptors: "the player", "the crowd", "the individual", NEVER "someone"
+- Order must be verifiable from the video
+- Answer format: Letter sequence like (B)(A)(C) or descriptive sequence
+- Audio must be non-speech or include emotional/semantic context
+
+GOOD EXAMPLE:
+Q: "What is the sequence? (A) Player in white shoots (B) Crowd cheers (C) Ball enters hoop"
+A: "(A)(B)(C)"
+""",
+
+            'inference': f"""
+TASK: INFERENCE - Why/purpose/meaning (MUST ask "why" or "purpose")
+
+AUDIO CUE: {audio_cue}
+VISUAL CONTEXT: {visual_desc}
+
+PATTERN OPTIONS (NEVER use "someone"):
+1. "Why does the individual in [specific descriptor] react to '{audio_cue[:25]}...'?"
+2. "What is the purpose of [specific visual element] when the audio '{audio_cue[:25]}...' occurs?"
+3. "Based on both audio and visual clues, why is [specific action happening]?"
+
+REQUIREMENTS:
+- MUST ask "why" or "purpose" or "meaning"
+- Use specific descriptors: "the player in blue", "the crowd", NOT "someone"
+- Answer explains the REASON or PURPOSE (not just describes what happens)
+- Must combine both audio and visual clues to infer the reason
+- Avoid vague words: something, someone, somewhere, maybe, perhaps
+
+GOOD EXAMPLE:
+Q: "Why does the audience react audibly after the player in white dunks the basketball?"
+A: "The move was impressive and unexpected."
+
+BAD: "What happens?" (not asking why)
+""",
+
+            'counting': f"""
+TASK: COUNTING - Count specific elements at audio moment
+
+AUDIO CUE: {audio_cue}
+VISUAL CONTEXT: {visual_desc}
+
+PATTERN OPTIONS (NO "someone"):
+1. "How many [specific objects] are visible when the audio cue '{audio_cue[:25]}...' occurs?"
+2. "How many times does [specific action] occur before the audio '{audio_cue[:25]}...' is heard?"
+3. "Count how many [specific objects] appear during the moment when '{audio_cue[:25]}...' happens?"
+
+REQUIREMENTS:
+- Must count specific, countable elements (players, objects, actions)
+- Count must be tied to the audio cue timing
+- Use specific descriptors, NEVER "someone"
+- Answer must be a specific number + brief description
+- Audio must be diverse: non-speech, crowd sounds, or speech with context
+
+GOOD EXAMPLE:
+Q: "How many players in white jerseys are visible when the crowd cheers loudly?"
+A: "3 players in white jerseys"
+""",
+
+            'comparative': f"""
+TASK: COMPARATIVE - Compare before/after or between elements
+
+AUDIO CUE: {audio_cue}
+VISUAL CONTEXT: {visual_desc}
+
+PATTERN OPTIONS (NO "someone"):
+1. "What is the difference in [visual element] before and after the audio '{audio_cue[:25]}...' occurs?"
+2. "How does [specific object] change when the audio cue '{audio_cue[:25]}...' is heard?"
+3. "What are the specific differences between [element A] and [element B] at the audio moment?"
+
+REQUIREMENTS:
+- Must compare two specific states/objects/people
+- Comparison must be tied to audio timing
+- Use specific descriptors instead of vague language
+- Answer highlights specific, measurable differences
+- Audio must be non-speech or include emotional/semantic context
+
+GOOD EXAMPLE:
+Q: "What changes on the scoreboard after the announcer shouts 'timeout'?"
+A: "The score increases from 52-51 to 55-51"
+""",
+
+            'needle': f"""
+TASK: NEEDLE - Find specific detail (text, graphic, jersey number, etc.)
+
+AUDIO CUE: {audio_cue}
+VISUAL CONTEXT: {visual_desc}
+
+PATTERN OPTIONS (NO "someone"):
+1. "What text/graphic appears on screen when the audio '{audio_cue[:25]}...' is heard?"
+2. "What specific jersey number is visible when '{audio_cue[:25]}...' occurs?"
+3. "Describe the specific [graphic/text/object] visible at the moment of the audio cue?"
+
+REQUIREMENTS:
+- Must ask for a very specific visual detail
+- Detail must be visible at the exact moment of audio cue
+- Use specific descriptors, never "someone"
+- Answer must be precise (exact text, specific number, color, etc.)
+- Audio context should help identify the moment
+
+GOOD EXAMPLE:
+Q: "What text pops up on screen when the announcer says 'subscribe'?"
+A: "Subscribe for more content"
+""",
+
+            'object_interaction': f"""
+TASK: OBJECT INTERACTION - How objects change through actions
+
+AUDIO CUE: {audio_cue}
+VISUAL CONTEXT: {visual_desc}
+
+PATTERN OPTIONS (NO "someone"):
+1. "What happens to [specific object] when the audio cue '{audio_cue[:25]}...' occurs?"
+2. "How does [specific object] change after the audio moment '{audio_cue[:25]}...'?"
+3. "What transformation occurs to [object] when [specific action] and audio '{audio_cue[:25]}...' happen together?"
+
+REQUIREMENTS:
+- Must describe a specific transformation or effect on an object
+- Change must be caused by or coincide with audio cue
+- Use specific descriptors, NEVER "someone"
+- Answer explains the transformation clearly
+- Audio must be diverse: non-speech, crowd sounds, or speech with clear context
+
+GOOD EXAMPLE:
+Q: "How does the clay change when 'pour over' is mentioned?"
+A: "The clay is molded into a cone shape"
+""",
+
+            'subscene': f"""
+TASK: SUBSCENE - Caption a video segment combining audio and visual
+
+AUDIO CUE: {audio_cue}
+VISUAL CONTEXT: {visual_desc}
+
+PATTERN OPTIONS (NO "someone"):
+1. "Describe the scene when the audio cue '{audio_cue[:25]}...' occurs?"
+2. "What happens in both audio and visual during the moment when '{audio_cue[:25]}...' is heard?"
+3. "Create a caption for the scene when the audio '{audio_cue[:25]}...' happens?"
+
+REQUIREMENTS:
+- Answer must describe BOTH visual and audio elements
+- Should caption a 2-5 second segment
+- Must be concise (1-2 sentences) but complete description
+- Use specific descriptors, never "someone"
+- Audio must be diverse: non-speech, crowd sounds, or speech with emotion
+
+GOOD EXAMPLE:
+Q: "Describe the scene when the crowd cheers loudly?"
+A: "Player in white blocks the opposing shot while the audience stands and applauds."
+""",
+
+            'context': f"""
+TASK: CONTEXT - Background/foreground elements when audio occurs
+
+AUDIO CUE: {audio_cue}
+VISUAL CONTEXT: {visual_desc}
+
+PATTERN OPTIONS (NO "someone"):
+1. "What contextual elements are visible in the background when the audio '{audio_cue[:25]}...' occurs?"
+2. "What text, branding, or objects surround the main action when '{audio_cue[:25]}...' is heard?"
+3. "What is the setting/context visible as the audio cue '{audio_cue[:25]}...' plays?"
+
+REQUIREMENTS:
+- Must ask about background, setting, or surrounding elements
+- Focus on context, not the main action
+- Use specific descriptors, never "someone"
+- Answer lists specific contextual elements
+- Audio timing helps identify the exact moment
+
+GOOD EXAMPLE:
+Q: "What branding is visible when the announcer shouts 'timeout'?"
+A: "Gatorade logo on cooler, Nike swoosh on jerseys, scoreboard in background"
+""",
+
+            'referential': f"""
+TASK: REFERENTIAL GROUNDING - Connect audio and visual at specific moment
+
+AUDIO CUE: {audio_cue}
+VISUAL CONTEXT: {visual_desc}
+
+PATTERN OPTIONS (NO "someone"):
+1. "What is the individual in [specific descriptor] doing when the audio cue '{audio_cue[:25]}...' occurs?"
+2. "Which person/object is visible when the audio '{audio_cue[:25]}...' is heard?"
+3. "What visual element creates or triggers the audio cue '{audio_cue[:25]}...'?"
+
+REQUIREMENTS:
+- Must ground/connect the audio to a specific visual element
+- Answer identifies who/what is directly associated with the audio
+- Use specific descriptors (player, person, individual), never names
+- Avoid pronouns: use "the player" not "he"
+- Audio should be diverse and contextualized
+
+GOOD EXAMPLE:
+Q: "What is the player in blue doing when the announcer shouts 'great move'?"
+A: "The player dribbles past two defenders and drives toward the basket."
+"""
+        }
+
+        selected_prompt = task_prompts.get(task_type, task_prompts['temporal'])
+
+        return f"""{base_rules}
+
+{selected_prompt}
+
+OUTPUT FORMAT (EXACTLY):
+Question: [your question following the pattern]
+Answer: [1-2 sentence specific answer]
+
+Remember: BOTH audio and visual required. NO NAMES. NO PRONOUNS. SPECIFIC ANSWER."""
+
     def _generate_single_gpt4v_question(
         self,
         frame_data: Dict,
@@ -962,82 +1291,54 @@ class AIQuestionGenerator:
         # Extract concise visual elements for visual cue
         visual_cue = self._extract_concise_visual_elements(gpt4v_desc)
 
-        # Select random question type
-        question_type = random.choice([
-            'temporal', 'inference', 'counting', 'comparative', 'needle',
-            'object_interaction', 'subscene', 'holistic', 'context'
-        ])
+        # Select random question type with weighted distribution
+        question_type = random.choices(
+            ['temporal', 'sequential', 'inference', 'counting', 'comparative',
+             'needle', 'object_interaction', 'subscene', 'context', 'referential'],
+            weights=[15, 15, 20, 10, 10, 10, 5, 5, 5, 5],
+            k=1
+        )[0]
 
-        # Generate question using GPT-4
+        # Build guideline-compliant prompt
         try:
-            prompt = f"""Generate a challenging multimodal video question that requires BOTH audio and visual information to answer.
+            prompt = self._build_task_specific_prompt(
+                question_type, audio_text, gpt4v_desc, timestamp
+            )
 
-AUDIO CUE: Someone says "{audio_text}" at timestamp {timestamp:.1f}s
+            # Use Claude Sonnet 4.5 instead of GPT-4
+            if not self.claude_client:
+                logger.error("Claude client not initialized")
+                return None
 
-VISUAL CONTEXT: {gpt4v_desc}
-
-QUESTION TYPE: {question_type.upper()}
-
-CRITICAL REQUIREMENTS:
-1. Question MUST require BOTH the audio cue AND visual to answer (not answerable with just video)
-2. Use descriptors ONLY (NO NAMES): "player in white jersey #13" NOT "George" or "Emmanuel"
-3. Answer must be SPECIFIC and CONCISE (NOT a full description dump)
-4. Answer should be 1-2 sentences maximum
-5. Question must be specific and answerable (NOT vague like "what can you infer?")
-
-QUESTION PATTERNS:
-- TEMPORAL: "What action is happening when someone says '{audio_text}'?"
-- INFERENCE: "What is the game situation when someone says '{audio_text}'?"
-- COUNTING: "How many [specific objects] are visible when you hear '{audio_text}'?"
-- COMPARATIVE: "What jersey colors are visible when someone says '{audio_text}'?"
-- NEEDLE: "What specific on-screen text/graphic is visible when someone says '{audio_text}'?"
-- OBJECT_INTERACTION: "What is the player doing with the ball when you hear '{audio_text}'?"
-- SUBSCENE: "What teams are playing when someone says '{audio_text}'?"
-- HOLISTIC: "What score is displayed when someone says '{audio_text}'?"
-- CONTEXT: "What court/arena branding is visible when you hear '{audio_text}'?"
-
-OUTPUT FORMAT:
-Question: [specific {question_type} question using pattern above]
-Answer: [specific 1-2 sentence answer, NO description dumps]
-
-EXAMPLES OF GOOD ANSWERS:
-- "White and dark jerseys"
-- "WSH 52, TOR 57"
-- "Player is dribbling near three-point line"
-- "Scotiabank Arena branding visible on court"
-
-EXAMPLES OF BAD ANSWERS (DO NOT DO THIS):
-- "When [audio] is said, the players are wearing... [long description]" ❌
-- "Based on the visual analysis..." ❌
-- Full paragraph descriptions ❌"""
-
-            response = openai.ChatCompletion.create(
-                model="gpt-4o",
-                messages=[{"role": "user", "content": prompt}],
+            response = self.claude_client.messages.create(
+                model="claude-sonnet-4-5-20250929",
                 max_tokens=250,
-                temperature=0.8
+                temperature=0.8,
+                messages=[{"role": "user", "content": prompt}]
             )
 
             self.total_cost += 0.02  # Estimate
 
-            content = response.choices[0].message.content
+            content = response.content[0].text
 
             # Parse response
             question_text, answer_text = self._parse_qa_response(content)
             if not question_text or not answer_text:
                 return None
 
-            # Determine task_types based on question_type
+            # Determine task_types based on question_type (per Guidelines doc)
             task_type_mapping = {
-                'temporal': ['temporal', 'referential', 'context'],
-                'inference': ['inference', 'context', 'holistic'],
-                'counting': ['counting', 'referential', 'context'],
-                'comparative': ['comparative', 'temporal', 'context'],
-                'needle': ['needle', 'referential', 'context'],
-                'object_interaction': ['object_interaction', 'referential', 'sequential'],
-                'subscene': ['subscene', 'context', 'holistic'],
-                'holistic': ['holistic', 'inference', 'context'],
-                'context': ['context', 'referential']
+                'temporal': ['Temporal Understanding'],
+                'sequential': ['Sequential', 'Temporal Understanding'],
+                'inference': ['Inference'],
+                'counting': ['Counting'],
+                'comparative': ['Comparative'],
+                'needle': ['Needle'],
+                'object_interaction': ['Object Interaction Reasoning'],
+                'subscene': ['Subscene'],
+                'context': ['Context'],
+                'referential': ['Referential Grounding'],
+                'holistic': ['General Holistic Reasoning']
             }
 
             # Calculate timestamps
@@ -1103,37 +1404,77 @@ EXAMPLES OF BAD ANSWERS (DO NOT DO THIS):
         # Filter out names from audio cue (enforce no-names rule)
         audio_text = self._remove_names_from_text(audio_text)
 
-        # Select question pattern based on weighted distribution
-        pattern_type = random.choices(
-            ['temporal', 'inference', 'counting', 'comparative', 'needle',
-             'object_interaction', 'subscene', 'spurious', 'context'],
-            weights=[30, 20, 10, 10, 10, 5, 5, 5, 5]
-        )[0]
-
-        # Generate question based on selected pattern
-        question_data = self._generate_pattern_question(
-            pattern_type, audio_text, claude_desc, gpt4v_desc
-        )
-
-        # Extract concise visual cue (NOT AI description dump)
+        # Extract concise visual cue
         visual_cue = self._extract_concise_visual_elements(claude_desc)
 
-        start_ts = self._format_timestamp(max(0, audio_cue["start"] - 1))
-        end_ts = self._format_timestamp(audio_cue["end"] + 2)
+        # Select question type with weighted distribution
+        question_type = random.choices(
+            ['temporal', 'sequential', 'inference', 'counting', 'comparative',
+             'needle', 'object_interaction', 'subscene', 'context', 'referential'],
+            weights=[15, 15, 20, 10, 10, 10, 5, 5, 5, 5],
+            k=1
+        )[0]
 
-        return MultimodalQuestion(
-            question_id=question_id,
-            question=question_data["question"],
-            golden_answer=question_data["answer"],
-            start_timestamp=start_ts,
-            end_timestamp=end_ts,
-            audio_cue=audio_text,
-            visual_cue=visual_cue,  # Concise description, not AI dump
-            task_types=question_data["task_types"],
-            generation_tier="ai_claude",
-            complexity="high",
-            requires_both_modalities=True
-        )
+        # Generate question using Claude with task-specific prompt
+        try:
+            prompt = self._build_task_specific_prompt(
+                question_type, audio_text, claude_desc, timestamp
+            )
+
+            if not self.claude_client:
+                logger.error("Claude client not initialized")
+                return None
+
+            response = self.claude_client.messages.create(
+                model="claude-sonnet-4-5-20250929",
+                max_tokens=250,
+                temperature=0.8,
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            self.total_cost += 0.02
+
+            content = response.content[0].text
+
+            # Parse response
+            question_text, answer_text = self._parse_qa_response(content)
+            if not question_text or not answer_text:
+                return None
+
+            # Task type mapping (per guidelines)
+            task_type_mapping = {
+                'temporal': ['Temporal Understanding'],
+                'sequential': ['Sequential', 'Temporal Understanding'],
+                'inference': ['Inference'],
+                'counting': ['Counting'],
+                'comparative': ['Comparative'],
+                'needle': ['Needle'],
+                'object_interaction': ['Object Interaction Reasoning'],
+                'subscene': ['Subscene'],
+                'context': ['Context'],
+                'referential': ['Referential Grounding']
+            }
+
+            start_ts = self._format_timestamp(max(0, audio_cue["start"] - 1))
+            end_ts = self._format_timestamp(audio_cue["end"] + 2)
+
+            return MultimodalQuestion(
+                question_id=question_id,
+                question=question_text,
+                golden_answer=answer_text,
+                start_timestamp=start_ts,
+                end_timestamp=end_ts,
+                audio_cue=audio_text,
+                visual_cue=visual_cue,
+                task_types=task_type_mapping.get(question_type, ["Temporal Understanding"]),
+                generation_tier="ai_claude",
+                complexity="high",
+                requires_both_modalities=True
+            )
+
+        except Exception as e:
+            logger.error(f"Claude generation failed: {e}")
+            return None
 
     def _generate_pattern_question(
         self,
@@ -1208,35 +1549,93 @@ EXAMPLES OF BAD ANSWERS (DO NOT DO THIS):
         return patterns.get(pattern_type, patterns['temporal'])
 
     def _extract_concise_visual_elements(self, description: str) -> str:
-        """Extract concise visual description (NOT full AI dump)
+        """Extract concise visual description from structured AI data
 
-        Returns: Short description like "Players in white and dark jerseys on basketball court"
-        NOT: Full markdown "# Video Frame Analysis\n\n## 1) Visible Objects..."
+        Uses actual data from GPT-4V/Claude JSON to create specific visual cues
+        Returns: Concise description with SPECIFIC details (jersey numbers, scores, etc.)
         """
-        # Extract key elements without markdown formatting
+        import json
+        import re
+
         visual_parts = []
 
-        # Look for jersey colors
-        if "white" in description.lower() and "jersey" in description.lower():
+        # Try to parse JSON description
+        try:
+            # Remove markdown code fences if present
+            json_text = description
+            if "```json" in json_text:
+                json_text = re.search(r'```json\s*(\{.*?\})\s*```', json_text, re.DOTALL)
+                if json_text:
+                    json_text = json_text.group(1)
+            elif "```" in json_text:
+                json_text = re.search(r'```\s*(\{.*?\})\s*```', json_text, re.DOTALL)
+                if json_text:
+                    json_text = json_text.group(1)
+
+            data = json.loads(json_text)
+
+            # Extract jersey numbers (most specific visual cue)
+            jersey_numbers = []
+            if "players" in data:
+                for player in data["players"][:3]:  # Max 3 players
+                    if "jersey_number" in player and player["jersey_number"] != "unknown":
+                        jersey_numbers.append(f"#{player['jersey_number']}")
+
+            if jersey_numbers:
+                visual_parts.append(f"players {', '.join(jersey_numbers)}")
+
+            # Extract score if available (very specific)
+            if "on_screen_text" in data and "score" in data["on_screen_text"]:
+                score = data["on_screen_text"]["score"]
+                if score and score != "unknown":
+                    visual_parts.append(f"score {score}")
+
+            # Extract game clock if available
+            if "on_screen_text" in data and "game_clock" in data["on_screen_text"]:
+                clock = data["on_screen_text"]["game_clock"]
+                if clock and clock != "unknown":
+                    visual_parts.append(f"clock {clock}")
+
+            # Extract branding (specific visual marker)
+            if "scene" in data and "branding" in data["scene"]:
+                branding = data["scene"]["branding"][:2]  # Max 2 brands
+                if branding:
+                    visual_parts.append(f"branding: {', '.join(branding)}")
+            elif "branding" in data:
+                branding = data["branding"][:2]
+                if branding:
+                    visual_parts.append(f"branding: {', '.join(branding)}")
+
+            # If we got specific details, return them
+            if visual_parts:
+                return ", ".join(visual_parts[:4])  # Max 4 specific elements
+
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            # JSON parsing failed, fall back to text parsing
+            logger.debug(f"JSON parsing failed for visual elements: {e}")
+
+        # Fallback: text-based extraction (less specific)
+        desc_lower = description.lower()
+
+        # Extract jersey numbers from text
+        jersey_matches = re.findall(r'#(\d+)|jersey.*?(\d+)', desc_lower)
+        if jersey_matches:
+            numbers = [m[0] or m[1] for m in jersey_matches[:3]]
+            visual_parts.append(f"players #{', #'.join(numbers)}")
+        elif "white" in desc_lower and "jersey" in desc_lower:
             visual_parts.append("players in white jerseys")
-        if "dark" in description.lower() or "black" in description.lower():
-            if "jersey" in description.lower():
-                visual_parts.append("players in dark jerseys")
+
+        # Look for scores in text
+        score_match = re.search(r'(\d+)\s*[-:]\s*(\d+)', description)
+        if score_match:
+            visual_parts.append(f"score {score_match.group(0)}")
 
         # Look for court/arena
-        if "court" in description.lower():
+        if "court" in desc_lower:
             visual_parts.append("on basketball court")
-        elif "arena" in description.lower():
-            visual_parts.append("in arena")
-
-        # Look for actions
-        if "dribbling" in description.lower():
-            visual_parts.append("player dribbling")
-        elif "shooting" in description.lower():
-            visual_parts.append("player shooting")
 
         if visual_parts:
-            return ", ".join(visual_parts[:3])  # Max 3 elements
+            return ", ".join(visual_parts[:3])
         else:
             return "basketball game in progress"
 
@@ -1408,20 +1807,28 @@ EXAMPLES OF BAD ANSWERS (DO NOT DO THIS):
         self,
         timestamp: float,
         audio_analysis: Dict,
-        max_distance: float = 3.0
+        max_distance: float = 10.0  # Increased from 3.0 to 10.0 seconds
     ) -> Optional[Dict]:
         """Find audio segment near timestamp"""
         segments = audio_analysis.get("segments", [])
-        
+
         closest = None
         min_dist = float('inf')
-        
+
         for segment in segments:
             dist = abs(segment["start"] - timestamp)
             if dist < min_dist and dist <= max_distance:
                 min_dist = dist
                 closest = segment
-        
+
+        # Fallback: If no audio within max_distance, return closest audio regardless
+        if not closest and segments:
+            for segment in segments:
+                dist = abs(segment["start"] - timestamp)
+                if dist < min_dist:
+                    min_dist = dist
+                    closest = segment
+
         return closest
     
     def _parse_qa_response(self, content: str) -> Tuple[Optional[str], Optional[str]]:
@@ -1482,7 +1889,7 @@ class TemplateIntegrator:
             from templates import get_registry
             
             registry = get_registry()
-            logger.info(f"   Loaded template registry with {len(registry.templates)} templates")
+            logger.info(f"   Loaded template registry with {len(registry.all_templates)} templates")
             
             # Generate questions using registry
             generated_questions = registry.generate_tier1_questions(
@@ -1726,7 +2133,9 @@ class MultimodalQuestionGeneratorV2:
             raise ValueError("OpenAI API key required")
         
         self.claude_api_key = claude_api_key or os.getenv("CLAUDE_API_KEY")
-        
+        if not self.claude_api_key:
+            raise ValueError("Claude API key required for Sonnet 4.5")
+
         # Initialize components
         self.converter = Phase4EvidenceConverter()
         self.premium_analyzer = PremiumFrameAnalyzer()
@@ -1735,8 +2144,15 @@ class MultimodalQuestionGeneratorV2:
             self.claude_api_key
         )
         self.template_integrator = TemplateIntegrator()
+
+        # NEW: Initialize validation module components
+        self.name_replacer = GeneralizedNameReplacer(anthropic_api_key=self.claude_api_key)
+        self.guidelines_validator = CompleteGuidelinesValidator()
+        self.answer_enforcer = AnswerGuidelinesEnforcer()  # NEW: Validate answers
+        self.type_classifier = QuestionTypeClassifier()
+        # Keep old validator for backward compatibility
         self.validator = UnifiedValidator()
-        
+
         self.total_cost = 0.0
         
         logger.info("=" * 80)
@@ -1850,13 +2266,20 @@ class MultimodalQuestionGeneratorV2:
         )
         result.questions.extend(template_questions)
         
-        # Step 5: Validate all questions
-        logger.info("\n✓ Step 5: Validating All Questions")
+        # Step 5: Validate all questions (original validator for backward compatibility)
+        logger.info("\n✓ Step 5: Validating All Questions (Original Validator)")
         result.questions = self.validator.validate_all_questions(
             result.questions,
             evidence_db
         )
-        
+
+        # Step 5b: Enhanced validation with new validation module
+        logger.info("\n✓ Step 5b: Enhanced Validation (Guidelines + Name Replacement + Type Classification)")
+        result.questions = self._apply_enhanced_validation(
+            result.questions,
+            evidence_db
+        )
+
         # Calculate final statistics
         result.total_questions = len(result.questions)
         result.validated_questions = len([q for q in result.questions if q.validated])
@@ -1881,7 +2304,135 @@ class MultimodalQuestionGeneratorV2:
         logger.info("=" * 80)
         
         return result
-    
+
+    def _apply_enhanced_validation(
+        self,
+        questions: List[MultimodalQuestion],
+        evidence_db: Dict
+    ) -> List[MultimodalQuestion]:
+        """
+        Apply enhanced validation using new validation module:
+        1. Name/pronoun replacement
+        2. Guidelines validation (all 15 rules)
+        3. Question type classification
+        """
+        validated_questions = []
+        total = len(questions)
+        passed_count = 0
+        failed_count = 0
+
+        logger.info(f"   Validating {total} questions with enhanced validator...")
+
+        for i, q in enumerate(questions):
+            # Build evidence dict for this question (used across all validation steps)
+            evidence = {
+                'audio_cues': [q.audio_cue],
+                'visual_cues': [q.visual_cue],
+                'gpt4v_descriptions': [],  # Not stored at question level
+                'claude_descriptions': []  # Not stored at question level
+            }
+
+            # Step 1: Replace names/pronouns in question and answer
+            try:
+                # Replace names in question
+                question_result = self.name_replacer.replace_names(q.question, evidence)
+                if question_result.has_names:
+                    q.question = question_result.cleaned
+                    logger.debug(f"      Replaced {question_result.entities_found} entities in question")
+
+                # Replace names in answer
+                answer_result = self.name_replacer.replace_names(q.golden_answer, evidence)
+                if answer_result.has_names:
+                    q.golden_answer = answer_result.cleaned
+                    logger.debug(f"      Replaced {answer_result.entities_found} entities in answer")
+
+            except Exception as e:
+                logger.warning(f"      Name replacement failed for Q{i+1}: {e}")
+
+            # Step 2: Validate against all 15 guidelines
+            try:
+                # Extract timestamps
+                start_parts = q.start_timestamp.split(':')
+                end_parts = q.end_timestamp.split(':')
+                start_seconds = int(start_parts[0]) * 3600 + int(start_parts[1]) * 60 + float(start_parts[2])
+                end_seconds = int(end_parts[0]) * 3600 + int(end_parts[1]) * 60 + float(end_parts[2])
+
+                validation_result = self.guidelines_validator.validate_question(
+                    question=q.question,
+                    answer=q.golden_answer,
+                    audio_cues=[q.audio_cue],
+                    visual_cues=[q.visual_cue],
+                    evidence=evidence,
+                    timestamps=(start_seconds, end_seconds)
+                )
+
+                # Only keep questions that pass all guidelines
+                if validation_result.is_valid:
+                    q.validated = True
+                    q.validation_notes = f"Passed {validation_result.rules_passed}/15 guidelines"
+                    passed_count += 1
+                else:
+                    q.validated = False
+                    q.validation_notes = f"Failed guidelines: {', '.join(validation_result.rule_violations[:3])}"
+                    failed_count += 1
+                    logger.debug(f"      Q{i+1} FAILED: {q.validation_notes}")
+                    continue  # Skip failed questions
+
+            except Exception as e:
+                logger.warning(f"      Guidelines validation failed for Q{i+1}: {e}")
+                q.validated = False
+                q.validation_notes = f"Validation error: {str(e)[:100]}"
+                failed_count += 1
+                continue
+
+            # NEW: Step 2.5 - Validate Answer follows guidelines
+            try:
+                answer_result = self.answer_enforcer.validate_answer(
+                    answer=q.golden_answer,
+                    question=q.question,
+                    audio_cue=q.audio_cue,
+                    visual_cue=q.visual_cue,
+                    evidence=evidence
+                )
+
+                if not answer_result.is_valid:
+                    q.validated = False
+                    q.validation_notes = f"Answer failed: {answer_result.violations[0] if answer_result.violations else 'unknown'}"
+                    failed_count -= 1  # Was already counted as passed
+                    logger.debug(f"      Q{i+1} ANSWER FAILED: {answer_result.violations}")
+                    continue  # Skip if answer fails
+
+                # Optionally auto-correct minor issues
+                if answer_result.warnings:
+                    logger.debug(f"      Q{i+1} answer warnings: {answer_result.warnings}")
+
+            except Exception as e:
+                logger.warning(f"      Answer validation failed for Q{i+1}: {e}")
+                q.validated = False
+                q.validation_notes = f"Answer validation error: {str(e)[:100]}"
+                failed_count -= 1
+                continue
+
+            # Step 3: Classify question types
+            try:
+                type_result = self.type_classifier.classify(q.question, evidence)
+                if type_result.task_types:
+                    q.task_types = type_result.task_types
+                    logger.debug(f"      Q{i+1} types: {', '.join(type_result.task_types[:2])}")
+            except Exception as e:
+                logger.warning(f"      Type classification failed for Q{i+1}: {e}")
+
+            # Add validated question
+            validated_questions.append(q)
+
+            if (i + 1) % 10 == 0:
+                logger.info(f"      Progress: {i+1}/{total} questions validated ({passed_count} passed, {failed_count} failed)")
+
+        logger.info(f"   ✓ Enhanced validation complete: {passed_count} passed, {failed_count} failed")
+        logger.info(f"   ✓ Returning {len(validated_questions)} questions")
+
+        return validated_questions
+
     def save_questions(
         self,
         result: QuestionGenerationResult,

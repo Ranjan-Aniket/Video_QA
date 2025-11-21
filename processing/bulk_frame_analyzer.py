@@ -230,12 +230,12 @@ class BulkFrameAnalyzer:
                 self.enable_ocr = False
 
     def _init_scene_detector(self):
-        """Initialize scene detector"""
+        """Initialize scene classifier"""
         if self.scene_detector is None and self.enable_scene:
             try:
-                from .scene_detector import SceneDetector
-                self.scene_detector = SceneDetector()
-                logger.info(f"✓ Places365 loaded")
+                from .places365_processor import Places365Processor
+                self.scene_detector = Places365Processor()
+                logger.info(f"✓ Places365 scene classifier loaded")
             except Exception as e:
                 logger.warning(f"⚠ Places365 unavailable: {e}")
                 self.enable_scene = False
@@ -519,7 +519,13 @@ class BulkFrameAnalyzer:
         objects = []
 
         # Handle ObjectDetectionResult object
-        detections = results.detections if hasattr(results, 'detections') else []
+        # ObjectDetectionResult has 'frame_results' not 'detections'
+        if hasattr(results, 'frame_results') and results.frame_results:
+            # Get first frame result (we only sent 1 frame)
+            frame_result = results.frame_results[0]
+            detections = frame_result.detections if hasattr(frame_result, 'detections') else []
+        else:
+            detections = []
 
         for det in detections:
             # Handle both DetectedObject objects and dicts
@@ -554,10 +560,16 @@ class BulkFrameAnalyzer:
 
         text_items = []
 
-        # Handle OCRResult object
-        text_regions = results.text_regions if hasattr(results, 'text_regions') else []
+        # Handle OCRExtractionResult object
+        # OCRExtractionResult has 'frame_results' not 'text_regions'
+        if hasattr(results, 'frame_results') and results.frame_results:
+            # Get first frame result (we only sent 1 frame)
+            frame_result = results.frame_results[0]
+            text_blocks = frame_result.text_blocks if hasattr(frame_result, 'text_blocks') else []
+        else:
+            text_blocks = []
 
-        for ocr_item in text_regions:
+        for ocr_item in text_blocks:
             # Handle both TextRegion objects and dicts
             if hasattr(ocr_item, 'to_dict'):
                 ocr_dict = ocr_item.to_dict()
@@ -567,20 +579,23 @@ class BulkFrameAnalyzer:
             text_items.append({
                 "text": ocr_dict.get("text", ""),
                 "confidence": float(ocr_dict.get("confidence", 0.0)),
-                "bbox": ocr_dict.get("bbox", [[0, 0], [0, 0], [0, 0], [0, 0]]),
+                "bbox": ocr_dict.get("bounding_box", [[0, 0], [0, 0], [0, 0], [0, 0]]),  # TextBlock uses 'bounding_box'
                 "orientation": ocr_dict.get("orientation", 0)
             })
         return text_items
 
     def _classify_scene(self, img: np.ndarray) -> tuple:
-        """Scene classification"""
+        """Scene classification using Places365"""
         if not self.scene_detector:
             return "unknown", 0.0
 
-        # TODO: scene_detector.detect_scenes() works on video files, not single frames
-        # Need to implement Places365 or similar for single-frame classification
-        # For now, return unknown
-        return "unknown", 0.0
+        try:
+            # Places365Processor.classify_scene() returns SceneClassification object
+            result = self.scene_detector.classify_scene(img)
+            return result.scene_category, result.confidence
+        except Exception as e:
+            logger.error(f"Scene classification failed: {e}")
+            return "unknown", 0.0
 
     def _generate_caption(self, img: np.ndarray) -> tuple:
         """BLIP-2 image captioning"""
@@ -756,6 +771,60 @@ class BulkFrameAnalyzer:
             audio_cue=frame.audio_cue,
             analysis_method="bulk_analyzer_failed"
         )
+
+    def analyze_frames(
+        self,
+        frames: List,
+        audio_analysis: Dict,
+        video_path: str
+    ) -> Dict:
+        """
+        Analyze multiple frames (batch processing for Phase 7)
+
+        Args:
+            frames: List of extracted frames with frame_id, timestamp, etc.
+            audio_analysis: Audio analysis dict (from Phase 1)
+            video_path: Path to video file
+
+        Returns:
+            Dict with evidence for all frames:
+            {
+                "frames": {
+                    "frame_001": {...},
+                    "frame_002": {...},
+                    ...
+                },
+                "evidence_count": int
+            }
+        """
+        logger.info(f"\n📊 Analyzing {len(frames)} frames with bulk analyzer...")
+
+        evidence_frames = {}
+
+        for i, frame in enumerate(frames):
+            frame_id = frame.frame_id
+
+            try:
+                # Analyze this frame
+                result = self.analyze_frame(frame)
+
+                # Convert to evidence format
+                evidence_frames[frame_id] = result.to_dict()
+
+                if (i + 1) % 10 == 0:
+                    logger.info(f"   Progress: {i+1}/{len(frames)} frames")
+
+            except Exception as e:
+                logger.error(f"   Error analyzing {frame_id}: {e}")
+                # Add empty result
+                evidence_frames[frame_id] = self._create_empty_result(frame).to_dict()
+
+        logger.info(f"✅ Completed analysis of {len(frames)} frames")
+
+        return {
+            "frames": evidence_frames,
+            "evidence_count": len(evidence_frames)
+        }
 
     def get_statistics(self) -> Dict[str, Any]:
         """Get comprehensive analysis statistics"""

@@ -42,12 +42,14 @@ from .object_detector import (
     ObjectDetectionResult
 )
 
-from .scene_detector import (
-    SceneDetector,
-    Scene,
-    SceneType,
-    SceneDetectionResult
+from .scene_detector_enhanced import (
+    SceneDetectorEnhanced,
+    EnhancedScene
 )
+
+# Alias for backward compatibility (smart_pipeline uses SceneDetectorEnhanced)
+SceneDetector = SceneDetectorEnhanced
+Scene = EnhancedScene
 
 from .evidence_extractor import (
     EvidenceExtractor,

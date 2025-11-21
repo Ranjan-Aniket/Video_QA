@@ -149,16 +149,43 @@ class OCRProcessor:
         logger.info(
             f"OCRProcessor initialized (local: {use_local_ocr})"
         )
-    
+
     def _init_easyocr(self):
         """Initialize EasyOCR engine (lazy loading)"""
         try:
-            # TODO: Implement with EasyOCR
-            # import easyocr
-            # self.ocr_engine = easyocr.Reader(['en'])  # Add more languages as needed
+            import easyocr
+
+            # Initialize EasyOCR with English language
+            self.ocr_engine = easyocr.Reader(['en'], gpu=False, verbose=False)
             logger.info("EasyOCR engine initialized")
         except ImportError:
-            logger.warning("EasyOCR not available, will use placeholder")
+            logger.warning("EasyOCR not available. Install with: pip install easyocr")
+            # Fall back to PaddleOCR
+            self._init_paddleocr()
+        except Exception as e:
+            logger.error(f"Failed to initialize EasyOCR: {e}")
+            # Fall back to PaddleOCR
+            self._init_paddleocr()
+
+    def _init_paddleocr(self):
+        """Initialize PaddleOCR engine (lazy loading)"""
+        try:
+            from paddleocr import PaddleOCR
+
+            # Initialize PaddleOCR with English language
+            self.ocr_engine = PaddleOCR(
+                use_angle_cls=True,  # Enable text angle classification
+                lang='en',  # English
+                show_log=False,  # Suppress PaddleOCR logging
+                use_gpu=False  # Use CPU (set True if GPU available)
+            )
+            logger.info("PaddleOCR engine initialized")
+        except ImportError:
+            logger.warning("PaddleOCR not available. Install with: pip install paddleocr")
+            self.ocr_engine = None
+        except Exception as e:
+            logger.error(f"Failed to initialize PaddleOCR: {e}")
+            self.ocr_engine = None
     
     def extract_text_from_frames(
         self,
@@ -248,55 +275,99 @@ class OCRProcessor:
     ) -> List[TextBlock]:
         """
         Extract text from single frame using configured OCR engine.
-        
+
         Args:
-            frame: Frame image (HxWxC numpy array, RGB format)
-        
+            frame: Frame image (HxWxC numpy array, RGB or BGR format)
+
         Returns:
             List of detected text blocks
         """
         if self.use_local_ocr:
-            return self._extract_with_easyocr(frame)
+            return self._extract_with_paddleocr(frame)
         else:
             return self._extract_with_google_vision(frame)
     
-    def _extract_with_easyocr(
+    def _extract_with_paddleocr(
         self, frame: np.ndarray
     ) -> List[TextBlock]:
         """
-        Extract text using EasyOCR (local, free).
-        
+        Extract text using PaddleOCR (local, free).
+
         Args:
-            frame: Frame image (HxWxC numpy array)
-        
+            frame: Frame image (HxWxC numpy array, BGR or RGB format)
+
         Returns:
             List of detected text blocks
         """
-        # TODO: Implement with EasyOCR
-        # if self.ocr_engine is None:
-        #     self._init_easyocr()
-        # 
-        # if self.ocr_engine is None:
-        #     return []
-        # 
-        # # Run OCR
-        # results = self.ocr_engine.readtext(frame)
-        # 
-        # # Convert to TextBlock objects
-        # text_blocks = []
-        # for bbox, text, confidence in results:
-        #     # bbox is [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-        #     text_blocks.append(TextBlock(
-        #         text=text,
-        #         confidence=confidence,
-        #         bounding_box=bbox,
-        #         language="en"  # EasyOCR doesn't provide language per detection
-        #     ))
-        # 
-        # return text_blocks
-        
-        logger.warning("_extract_with_easyocr not implemented - placeholder")
-        return []
+        # Initialize OCR engine if not already loaded
+        if self.ocr_engine is None:
+            if self.use_local_ocr:
+                self._init_easyocr()
+            else:
+                self._init_paddleocr()
+
+        if self.ocr_engine is None:
+            logger.warning("OCR engine not available, returning empty")
+            return []
+
+        try:
+            # Check which OCR engine is loaded and use appropriate API
+            import easyocr
+
+            if isinstance(self.ocr_engine, easyocr.Reader):
+                # EasyOCR API: readtext()
+                # Returns: [([[x1,y1], [x2,y2], [x3,y3], [x4,y4]], text, confidence), ...]
+                results = self.ocr_engine.readtext(frame)
+
+                if not results:
+                    return []
+
+                # Convert EasyOCR results to TextBlock objects
+                text_blocks = []
+                for bbox, text, confidence in results:
+                    # bbox is already a list of [x, y] pairs
+                    bbox_tuples = [(int(point[0]), int(point[1])) for point in bbox]
+
+                    text_blocks.append(TextBlock(
+                        text=text,
+                        confidence=float(confidence),
+                        bounding_box=bbox_tuples,
+                        language="en"
+                    ))
+            else:
+                # PaddleOCR API: ocr()
+                # Returns: [[[bbox], (text, confidence)], ...]
+                results = self.ocr_engine.ocr(frame, cls=True)
+
+                if results is None or len(results) == 0:
+                    return []
+
+                # Convert PaddleOCR results to TextBlock objects
+                text_blocks = []
+                for line in results[0] if results[0] is not None else []:
+                    if line is None:
+                        continue
+
+                    bbox, (text, confidence) = line
+
+                    # bbox format: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+                    bbox_tuples = [(int(point[0]), int(point[1])) for point in bbox]
+
+                    text_blocks.append(TextBlock(
+                        text=text,
+                        confidence=float(confidence),
+                        bounding_box=bbox_tuples,
+                        language="en"
+                    ))
+
+            logger.debug(f"PaddleOCR detected {len(text_blocks)} text blocks")
+            return text_blocks
+
+        except Exception as e:
+            logger.error(f"PaddleOCR extraction failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
     
     def _extract_with_google_vision(
         self, frame: np.ndarray
@@ -420,7 +491,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     
     # Initialize processor with local OCR (free)
-    processor = OCRProcessor(use_local_ocr=True, enable_caching=True)
+    processor = OCRProcessor(use_local_ocr=True, enable_caching=False)
     
     # Example 1: JIT single frame OCR (recommended)
     # frame = np.random.randint(0, 255, (720, 1280, 3), dtype=np.uint8)

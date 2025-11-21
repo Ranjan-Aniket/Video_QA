@@ -4,34 +4,56 @@ interface QuestionCardProps {
   question: any
   index: number
   videoUrl: string
+  onSeekTo?: (timestamp: string) => void  // Callback to seek video to timestamp
 }
 
 /**
  * QuestionCard Component
- * 
+ *
  * Following EXACT design from architecture:
  * - Question text
  * - Gemini answer vs Golden answer comparison
  * - Failure type badge
  * - Score (0-10)
- * - Timestamp range
+ * - Timestamp range (NOW VISIBLE IN COLLAPSED VIEW!)
  * - [▶️ Play Segment] button
  * - [📝 View Full] modal
  * - Evidence trail (clickable)
  */
-export default function QuestionCard({ question, index, videoUrl: _videoUrl }: QuestionCardProps) {
+export default function QuestionCard({ question, index, videoUrl: _videoUrl, onSeekTo }: QuestionCardProps) {
   const [expanded, setExpanded] = useState(false)
 
+  // Convert HH:MM:SS to seconds
+  const parseTimestamp = (timestamp: string): number => {
+    const parts = timestamp.split(':')
+    if (parts.length === 3) {
+      return parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseInt(parts[2])
+    }
+    return 0
+  }
+
   const handlePlaySegment = () => {
-    // Would trigger video player to jump to timestamp
-    const timestampStart = question.timestamp_start
-    console.log('Play from:', timestampStart)
+    const timestampStart = question.start_timestamp || question.timestamp_start || '00:00:00'
+
+    // If callback provided, use it
+    if (onSeekTo) {
+      onSeekTo(timestampStart)
+    } else {
+      // Otherwise, try to find video player on page
+      const videoElement = document.querySelector('video') as HTMLVideoElement
+      if (videoElement) {
+        videoElement.currentTime = parseTimestamp(timestampStart)
+        videoElement.play()
+      }
+    }
+
+    console.log('Playing from:', timestampStart)
   }
 
   return (
     <div className="bg-white border rounded-lg shadow hover:shadow-lg transition-shadow">
       {/* Header */}
-      <div 
+      <div
         onClick={() => setExpanded(!expanded)}
         className="p-4 cursor-pointer hover:bg-gray-50"
       >
@@ -41,6 +63,18 @@ export default function QuestionCard({ question, index, videoUrl: _videoUrl }: Q
               <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded text-xs font-semibold">
                 Q{index}
               </span>
+              {/* Timestamp Badge - Clickable */}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  handlePlaySegment()
+                }}
+                className="bg-purple-100 text-purple-800 hover:bg-purple-200 px-2 py-1 rounded text-xs font-mono font-semibold transition-colors flex items-center gap-1"
+                title="Click to play video at this timestamp"
+              >
+                <span>🕐</span>
+                <span>{question.start_timestamp || question.timestamp_start || '00:00:00'}</span>
+              </button>
               <span className="text-xs text-gray-500">{question.task_type}</span>
               {question.failure_type && (
                 <span className="bg-red-100 text-red-800 px-2 py-1 rounded text-xs">
@@ -103,9 +137,16 @@ export default function QuestionCard({ question, index, videoUrl: _videoUrl }: Q
 
           {/* Metadata */}
           <div className="grid grid-cols-3 gap-4 text-sm">
-            <div>
-              <div className="text-gray-500">Timestamp</div>
-              <div className="font-mono">{question.timestamp_start} - {question.timestamp_end}</div>
+            <div className="bg-purple-50 p-3 rounded border border-purple-200">
+              <div className="text-purple-700 font-semibold mb-1 flex items-center gap-1">
+                <span>🕐</span>
+                <span>Timestamp Range</span>
+              </div>
+              <div className="font-mono text-purple-900">
+                {question.start_timestamp || question.timestamp_start || '00:00:00'}
+                <span className="mx-2 text-purple-400">→</span>
+                {question.end_timestamp || question.timestamp_end || '00:00:08'}
+              </div>
             </div>
             <div>
               <div className="text-gray-500">Validation Layers Passed</div>
@@ -121,9 +162,10 @@ export default function QuestionCard({ question, index, videoUrl: _videoUrl }: Q
           <div className="flex gap-3">
             <button
               onClick={handlePlaySegment}
-              className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded text-sm"
+              className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded text-sm font-semibold transition-colors flex items-center gap-2"
             >
-              ▶️ Play Segment
+              <span>▶️</span>
+              <span>Play at {question.start_timestamp || question.timestamp_start || '00:00:00'}</span>
             </button>
             <button className="bg-gray-200 hover:bg-gray-300 text-gray-700 px-4 py-2 rounded text-sm">
               📝 View Full Details

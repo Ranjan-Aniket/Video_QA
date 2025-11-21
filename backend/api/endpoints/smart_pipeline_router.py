@@ -202,7 +202,7 @@ async def get_pipeline_status(video_id: str):
     try:
         # NEW: Check outputs directory directly without database lookup
         # This allows status checks for videos not in the database
-        output_dir = Path("outputs") / video_id
+        output_dir = Path("uploads/outputs")
 
         if not output_dir.exists():
             return {
@@ -213,34 +213,46 @@ async def get_pipeline_status(video_id: str):
                 "phases_complete": []
             }
 
-        # Find any JSON files to determine video_stem
-        json_files = list(output_dir.glob("*_audio_analysis.json"))
-        if json_files:
-            video_stem = json_files[0].stem.replace("_audio_analysis", "")
-        else:
-            # No files yet, but directory exists
-            video_stem = video_id
+        # video_stem is the base filename (video_id without extension)
+        video_stem = video_id.replace(".mp4", "")
 
-        # Check which phases are complete (NEW ADVERSARIAL PIPELINE)
+        # Check which phases are complete (NEW 9-PHASE PIPELINE)
         phases_complete = []
 
-        if (output_dir / f"{video_stem}_audio_analysis.json").exists():
+        # Phase 1: Audio + Scene + Quality
+        if (output_dir / f"{video_stem}_phase1_audio_scene_quality.json").exists():
             phases_complete.append("audio_analysis")
 
-        if (output_dir / f"{video_stem}_opportunities.json").exists():
-            phases_complete.append("opportunity_mining")
+        # Phase 2: Visual Samples
+        if (output_dir / f"{video_stem}_phase2_visual_samples.json").exists():
+            phases_complete.append("visual_sampling")
 
+        # Phase 3: Highlights
+        if (output_dir / f"{video_stem}_phase3_highlights.json").exists():
+            phases_complete.append("highlight_detection")
+
+        # Phase 4: Frame Budget
+        if (output_dir / f"{video_stem}_phase4_frame_budget.json").exists():
+            phases_complete.append("frame_budget")
+
+        # Phase 5: Frame Selection
+        if (output_dir / f"{video_stem}_phase5_frame_selection.json").exists():
+            phases_complete.append("frame_selection")
+
+        # Phase 6: Frame Extraction
         if (output_dir / "frames" / video_stem / "frames_metadata.json").exists():
             phases_complete.append("frame_extraction")
 
-        if (output_dir / f"{video_stem}_evidence.json").exists():
+        # Phase 7: Evidence Extraction
+        if (output_dir / f"{video_stem}_phase7_evidence.json").exists():
             phases_complete.append("evidence_extraction")
 
-        if (output_dir / f"{video_stem}_questions.json").exists():
+        # Phase 8: Question Generation
+        if (output_dir / f"{video_stem}_phase8_questions.json").exists():
             phases_complete.append("question_generation")
 
-        # Calculate progress
-        total_phases = 5  # Audio, Opportunities, Frames, Evidence, Questions
+        # Calculate progress (8 total phases)
+        total_phases = 8
         progress = len(phases_complete) / total_phases
 
         # Determine status
@@ -253,11 +265,14 @@ async def get_pipeline_status(video_id: str):
         else:
             status = "processing"
             phase_names = {
-                1: "Audio Analysis",
-                2: "Opportunity Mining",
-                3: "Frame Extraction",
-                4: "Evidence Extraction",
-                5: "Question Generation"
+                1: "Phase 1: Audio + Scene + Quality",
+                2: "Phase 2: Visual Sampling",
+                3: "Phase 3: Highlight Detection",
+                4: "Phase 4: Frame Budget",
+                5: "Phase 5: Frame Selection (LLM)",
+                6: "Phase 6: Frame Extraction",
+                7: "Phase 7: Evidence Extraction",
+                8: "Phase 8: Question Generation"
             }
             current_phase = phase_names.get(len(phases_complete) + 1, f"Phase {len(phases_complete) + 1}")
 

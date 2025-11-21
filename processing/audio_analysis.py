@@ -179,7 +179,7 @@ class AudioAnalyzer:
                 str(audio_path),
                 language="en",  # Can be auto-detected if needed
                 task="transcribe",
-                verbose=False,  # Disabled to prevent I/O errors in background tasks
+                verbose=True,  # Enable to see transcription progress
                 word_timestamps=True  # ENABLED for precise temporal alignment (required for adversarial questions)
             )
 
@@ -258,15 +258,25 @@ class AudioAnalyzer:
 
         try:
             from pyannote.audio import Pipeline
+            import os
 
             # Load pretrained pipeline
             logger.info("Loading pyannote pipeline...")
-            # Note: Requires HuggingFace token for first-time use
-            # Set via: export HF_TOKEN=your_token_here
-            pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1",
-                use_auth_token=True
-            )
+
+            # Get HuggingFace token from environment
+            hf_token = os.getenv('HF_TOKEN')
+            if hf_token:
+                logger.info("Using HuggingFace token for speaker diarization")
+                pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1",
+                    use_auth_token=hf_token
+                )
+            else:
+                logger.warning("No HF_TOKEN found - speaker diarization may fail")
+                pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1",
+                    use_auth_token=True
+                )
 
             # Run diarization
             logger.info(f"Diarizing: {audio_path.name}")
@@ -696,8 +706,10 @@ class AudioAnalyzer:
             in_gap = False
             gap_start = None
 
-            hop_length = 512
-            times = librosa.frames_to_time(np.arange(len(silent)), sr=sr, hop_length=hop_length)
+            # BUG FIX: Convert sample indices to seconds directly (not frame indices)
+            # Previous code used librosa.frames_to_time() which expects STFT frames,
+            # but we're working with raw samples here
+            times = np.arange(len(silent)) / sr  # Convert sample indices to seconds
 
             for i, is_silent in enumerate(silent):
                 if is_silent and not in_gap:
@@ -830,12 +842,13 @@ class AudioAnalyzer:
         secs = td.seconds % 60
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
-    def analyze(self, save_json: bool = True) -> Dict:
+    def analyze(self, save_json: bool = True, output_dir: Optional[Path] = None) -> Dict:
         """
         Complete audio analysis pipeline with optimized audio event detection
 
         Args:
             save_json: Save results to JSON file
+            output_dir: Directory to save audio file (default: temp dir)
 
         Returns:
             Complete analysis results with segments, audio events, and silence gaps
@@ -844,8 +857,8 @@ class AudioAnalyzer:
         logger.info("STARTING COMPLETE AUDIO ANALYSIS (OPTIMIZED)")
         logger.info("=" * 80)
 
-        # Step 1: Extract audio
-        self.extract_audio()
+        # Step 1: Extract audio to specified directory
+        self.extract_audio(output_dir=output_dir)
 
         # Step 2: Transcribe with word-level timestamps
         self.transcribe_with_whisper()

@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str = Field(default="", description="Anthropic API key")
     google_api_key: str = Field(default="", description="Google API key")
     gemini_api_key: str = Field(default="", description="Gemini API key")
+    hf_token: Optional[str] = Field(default=None, description="HuggingFace token for speaker diarization")
     
     # ==================== MODEL CONFIGURATION ====================
     gemini_model: str = Field(default="gemini-2.5-pro")

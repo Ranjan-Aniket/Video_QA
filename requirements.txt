@@ -64,6 +64,7 @@ openai-whisper>=20231117
 librosa>=0.10.0
 soundfile>=0.12.0
 noisereduce>=3.0.0
+pyannote.audio>=3.0.0  # Speaker diarization (requires HF token)
 
 # ----------------------------------------------------------------------------
 # VIDEO/IMAGE PROCESSING
@@ -74,6 +75,8 @@ ffmpeg-python>=0.2.0
 pytesseract>=0.3.10
 easyocr>=1.7.0
 ultralytics>=8.1.0
+scenedetect[opencv]>=0.6.0  # Scene boundary detection
+git+https://github.com/openai/CLIP.git  # OpenAI CLIP for vision-language tasks
 
 # ----------------------------------------------------------------------------
 # NLP & TEXT PROCESSING (pre-built wheels for macOS)
@@ -141,5 +144,8 @@ pytest-cov>=4.1.0
 #
 # Post-install:
 #   python -m spacy download en_core_web_sm
+#   huggingface-cli login  # Required for pyannote speaker diarization
+#   # Or set HF_TOKEN environment variable with token from:
+#   # https://huggingface.co/settings/tokens
 #
 # ============================================================================

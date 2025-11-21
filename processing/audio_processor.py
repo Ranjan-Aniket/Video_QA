@@ -94,7 +94,7 @@ class AudioProcessor:
     def __init__(
         self,
         cache_dir: Optional[Path] = None,
-        enable_caching: bool = True,
+        enable_caching: bool = False,
         whisper_api_key: Optional[str] = None
     ):
         """
@@ -456,7 +456,7 @@ class AudioProcessor:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     
-    processor = AudioProcessor(enable_caching=True)
+    processor = AudioProcessor(enable_caching=False)
     
     # Example 1: JIT segment transcription (recommended)
     segment = processor.transcribe_segment_jit(

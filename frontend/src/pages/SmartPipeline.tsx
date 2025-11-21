@@ -177,8 +177,17 @@ export default function SmartPipeline() {
         </div>
 
         {statusData.phases_complete && (
-          <div className="mt-4 grid grid-cols-3 gap-2 text-xs">
-            {['audio_analysis', 'opportunity_mining', 'frame_extraction', 'evidence_extraction', 'question_generation'].map((phase) => (
+          <div className="mt-4 grid grid-cols-4 gap-2 text-xs">
+            {[
+              'audio_analysis',
+              'visual_sampling',
+              'highlight_detection',
+              'frame_budget',
+              'frame_selection',
+              'frame_extraction',
+              'evidence_extraction',
+              'question_generation'
+            ].map((phase) => (
               <div
                 key={phase}
                 className={`p-2 rounded text-center ${

@@ -1,0 +1,91 @@
+# Modified Files - Checkpoint: Opportunities Complete
+# Date: November 19, 2025
+
+## Backend Processing Files (Python)
+
+1. processing/bulk_frame_analyzer.py
+   - Fixed YOLO data extraction (line 522-528)
+   - Fixed OCR data extraction (line 564-570)
+   - Fixed OCR bbox field name (line 582)
+   - Changed scene classifier import (line 232-241)
+   - Updated _classify_scene method (line 587-598)
+
+2. processing/ocr_processor.py
+   - Implemented _init_paddleocr (line 153-171)
+   - Implemented _extract_with_paddleocr (line 273-327)
+   - Full PaddleOCR integration
+
+3. processing/places365_processor.py
+   - Implemented model loading (line 89-125)
+   - Created heuristic scene classification (line 176-250)
+   - Basketball/sports detection
+
+4. processing/blip2_processor.py
+   - Uncommented model loading (line 66-100)
+   - Uncommented caption generation (line 102-155)
+   - Full BLIP-2 implementation
+
+5. processing/multimodal_question_generator_v2.py
+   - Fixed OpenAI API (line 31, 851, 1014)
+   - Fixed template registry (line 1485)
+   - Rewrote _extract_concise_visual_elements (line 1210-1299)
+
+6. processing/clip_processor.py
+   - Added encode_image method (line 253-295)
+
+7. processing/smart_pipeline.py
+   - Enabled all models (CLIP, FER, DeepSport, text_orientation)
+   - Lines 633-707 (all three analyzers)
+
+8. processing/object_detector.py
+   - Complete rewrite (512 lines)
+   - Full YOLO implementation with all dataclasses
+
+## Frontend Files (TypeScript/React)
+
+9. frontend/src/components/QuestionCard.tsx
+   - Added timestamp badge in collapsed view (line 44-55)
+   - Made timestamps clickable (line 26-51)
+   - Enhanced timestamp display (line 140-169)
+   - Added onSeekTo prop
+
+## Documentation Files (New)
+
+10. CHECKPOINT_OPPORTUNITIES_COMPLETE.md (THIS FILE)
+11. MODIFIED_FILES_LIST.txt (THIS FILE)
+
+---
+
+## Quick Verification
+
+To verify all changes are in place, check:
+
+```bash
+# Backend
+grep -n "from .places365_processor import Places365Processor" processing/bulk_frame_analyzer.py
+grep -n "def _extract_with_paddleocr" processing/ocr_processor.py
+grep -n "def encode_image" processing/clip_processor.py
+grep -n "enable_clip=True" processing/smart_pipeline.py
+
+# Frontend
+grep -n "onSeekTo" frontend/src/components/QuestionCard.tsx
+grep -n "bg-purple-100" frontend/src/components/QuestionCard.tsx
+```
+
+Expected outputs should show line numbers where changes exist.
+
+---
+
+## File Sizes (Approximate)
+
+- bulk_frame_analyzer.py: ~30 KB
+- ocr_processor.py: ~12 KB
+- places365_processor.py: ~9 KB
+- blip2_processor.py: ~10 KB
+- multimodal_question_generator_v2.py: ~75 KB
+- clip_processor.py: ~12 KB
+- smart_pipeline.py: ~35 KB
+- object_detector.py: ~17 KB
+- QuestionCard.tsx: ~5 KB
+
+Total: ~205 KB of modified code

@@ -20,7 +20,7 @@ from .frame_extractor import FrameExtractor, SamplingStrategy, FrameExtractionCo
 from .audio_processor import AudioProcessor
 from .ocr_processor import OCRProcessor
 from .object_detector import ObjectDetector
-from .scene_detector import SceneDetector
+from .scene_detector_enhanced import SceneDetectorEnhanced as SceneDetector
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +92,7 @@ class EvidenceExtractor:
         video_path: Path,
         video_id: str,
         cache_dir: Optional[Path] = None,
-        enable_caching: bool = True
+        enable_caching: bool = False
     ):
         """
         Initialize evidence extractor for a video.
@@ -218,7 +218,7 @@ class EvidenceExtractor:
     def _init_audio_processor(self):
         """Initialize audio processor (lazy)"""
         if self.audio_processor is None:
-            self.audio_processor = AudioProcessor(enable_caching=True)
+            self.audio_processor = AudioProcessor(enable_caching=False)
             logger.debug("AudioProcessor initialized")
     
     def _init_ocr_processor(self):
@@ -390,7 +390,7 @@ class EvidenceExtractor:
         if not self.audio_processor:
             self.audio_processor = AudioProcessor(
                 cache_dir=self.cache_dir / "audio",
-                enable_caching=True
+                enable_caching=False
             )
 
         # Extract transcript (critical for most questions)
@@ -1020,7 +1020,7 @@ if __name__ == "__main__":
     extractor = EvidenceExtractor(
         video_path=Path("sample_video.mp4"),
         video_id="vid_abc123",
-        enable_caching=True
+        enable_caching=False
     )
     
     request = EvidenceRequest(

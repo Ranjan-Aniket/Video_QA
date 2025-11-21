@@ -127,7 +127,7 @@ class VideoProcessor:
         self,
         max_processing_cost: float = 2.40,
         cache_dir: Optional[Path] = None,
-        enable_caching: bool = True,
+        enable_caching: bool = False,
         load_models: bool = True
     ):
         """

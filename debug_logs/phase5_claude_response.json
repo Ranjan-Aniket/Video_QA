@@ -1,0 +1,277 @@
+```json
+{
+  "execution_summary": {
+    "pass1_count": 45,
+    "pass2_executed": true,
+    "pass2_count": 82,
+    "frames_added_pass2": 37,
+    "gap_analysis": {
+      "total_gaps_identified": 8,
+      "qualifying_gaps_over_40s": 5,
+      "gaps_filled": 5
+    }
+  },
+  "selection_plan": [
+    {
+      "timestamp": 0.5,
+      "reason": "High audio (0.59) + visual (1.00) + 5 people detected + video opening context",
+      "question_types": ["Temporal Understanding", "Context", "Counting"],
+      "priority": 0.696
+    },
+    {
+      "timestamp": 27.4,
+      "reason": "Top highlight (0.799) + man in blue mask driving + 2 objects + 5 people detected",
+      "question_types": ["Referential Grounding", "Object Interaction Reasoning", "General Holistic Reasoning"],
+      "priority": 0.799
+    },
+    {
+      "timestamp": 27.5,
+      "reason": "Peak highlight (0.799) + audio (0.53) + visual (1.00) + semantic (0.95) convergence",
+      "question_types": ["Audio-Visual Stitching", "Temporal Understanding"],
+      "priority": 0.799
+    },
+    {
+      "timestamp": 40.9,
+      "reason": "Second highest highlight (0.787) + audio peak (1.00) + visual (1.00) + semantic (0.82)",
+      "question_types": ["Audio-Visual Stitching", "General Holistic Reasoning"],
+      "priority": 0.787
+    },
+    {
+      "timestamp": 56.2,
+      "reason": "Text detected: 'To THE nuiun 9 LABLL 2,6080' + billboard scene + 5 people",
+      "question_types": ["Needle", "Context", "Counting"],
+      "priority": 0.75
+    },
+    {
+      "timestamp": 77.9,
+      "reason": "High highlight (0.765) + audio (0.87) + visual (1.00) + semantic (0.85)",
+      "question_types": ["Audio-Visual Stitching", "Temporal Understanding"],
+      "priority": 0.765
+    },
+    {
+      "timestamp": 86.9,
+      "reason": "Strong highlight (0.742) + audio (0.71) + visual (1.00) + semantic (0.90)",
+      "question_types": ["Audio-Visual Stitching", "General Holistic Reasoning"],
+      "priority": 0.742
+    },
+    {
+      "timestamp": 92.8,
+      "reason": "Highlight (0.701) + audio (0.61) + visual (1.00) + semantic (0.85) + 5 people",
+      "question_types": ["Audio-Visual Stitching", "Counting"],
+      "priority": 0.701
+    },
+    {
+      "timestamp": 136.8,
+      "reason": "Strong highlight (0.739) + audio (0.63) + visual (1.00) + semantic (0.95)",
+      "question_types": ["Audio-Visual Stitching", "Temporal Understanding"],
+      "priority": 0.739
+    },
+    {
+      "timestamp": 140.0,
+      "reason": "Man holding blue ring + 2 objects detected + 5 people + object interaction",
+      "question_types": ["Referential Grounding", "Object Interaction Reasoning", "Inference"],
+      "priority": 0.75
+    },
+    {
+      "timestamp": 142.9,
+      "reason": "Highlight (0.735) + audio (0.75) + visual (1.00) + semantic (0.85)",
+      "question_types": ["Audio-Visual Stitching", "General Holistic Reasoning"],
+      "priority": 0.735
+    },
+    {
+      "timestamp": 152.4,
+      "reason": "Strong highlight (0.752) + audio (0.68) + visual (1.00) + semantic (0.95)",
+      "question_types": ["Audio-Visual Stitching", "Temporal Understanding"],
+      "priority": 0.752
+    },
+    {
+      "timestamp": 164.9,
+      "reason": "Highlight (0.725) + audio (0.61) + visual (1.00) + semantic (0.92)",
+      "question_types": ["Audio-Visual Stitching", "General Holistic Reasoning"],
+      "priority": 0.725
+    },
+    {
+      "timestamp": 173.7,
+      "reason": "Highlight (0.745) + audio (0.76) + visual (1.00) + semantic (0.87)",
+      "question_types": ["Audio-Visual Stitching", "Temporal Understanding"],
+      "priority": 0.745
+    },
+    {
+      "timestamp": 196.8,
+      "reason": "Strong highlight (0.754) + audio (0.83) + visual (1.00) + semantic (0.85)",
+      "question_types": ["Audio-Visual Stitching", "General Holistic Reasoning"],
+      "priority": 0.754
+    },
+    {
+      "timestamp": 225.0,
+      "reason": "High highlight (0.767) + audio (0.74) + visual (1.00) + semantic (0.95)",
+      "question_types": ["Audio-Visual Stitching", "Temporal Understanding"],
+      "priority": 0.767
+    },
+    {
+      "timestamp": 236.9,
+      "reason": "Third highest highlight (0.785) + audio (0.81) + visual (1.00) + semantic (0.95)",
+      "question_types": ["Audio-Visual Stitching", "Temporal Understanding"],
+      "priority": 0.785
+    },
+    {
+      "timestamp": 244.0,
+      "reason": "Strong highlight (0.769) + audio (0.79) + visual (1.00) + semantic (0.92)",
+      "question_types": ["Audio-Visual Stitching", "General Holistic Reasoning"],
+      "priority": 0.769
+    },
+    {
+      "timestamp": 250.0,
+      "reason": "Gap fill 244s→260s + highlight (0.698) + visual (1.00) + semantic (0.93)",
+      "question_types": ["Temporal Understanding", "General Holistic Reasoning"],
+      "priority": 0.698
+    },
+    {
+      "timestamp": 260.3,
+      "reason": "Text detected: 'OWEN'S FIRST TIME THE NEW HOUS' + sports_field_outdoor scene + 5 people + scene transition",
+      "question_types": ["Needle", "Context", "Comparative", "Counting"],
+      "priority": 0.75
+    },
+    {
+      "timestamp": 265.0,
+      "reason": "High highlight (0.765) + audio (0.87) + visual (1.00) + semantic (0.85)",
+      "question_types": ["Audio-Visual Stitching", "Temporal Understanding"],
+      "priority": 0.765
+    },
+    {
+      "timestamp": 298.9,
+      "reason": "Gap fill 265s→321s + man sitting in room + 5 people + indoor_medium scene",
+      "question_types": ["Context", "Counting", "Sequential"],
+      "priority": 0.75
+    },
+    {
+      "timestamp": 321.7,
+      "reason": "Fourth highest highlight (0.781) + audio peak (1.00) + visual (0.98) + semantic (0.82)",
+      "question_types": ["Audio-Visual Stitching", "Temporal Understanding"],
+      "priority": 0.781
+    },
+    {
+      "timestamp": 329.9,
+      "reason": "Highlight (0.742) + audio peak (1.00) + visual (0.92) + semantic (0.75)",
+      "question_types": ["Audio-Visual Stitching", "General Holistic Reasoning"],
+      "priority": 0.742
+    },
+    {
+      "timestamp": 343.8,
+      "reason": "High highlight (0.770) + audio (0.80) + visual (0.95) + semantic (0.95)",
+      "question_types": ["Audio-Visual Stitching", "Temporal Understanding"],
+      "priority": 0.770
+    },
+    {
+      "timestamp": 352.7,
+      "reason": "Gap fill 343s→362s + highlight (0.681) + visual (0.99) + semantic (0.90)",
+      "question_types": ["Temporal Understanding", "General Holistic Reasoning"],
+      "priority": 0.681
+    },
+    {
+      "timestamp": 362.9,
+      "reason": "Highlight (0.720) + audio (0.80) + visual (0.96) + semantic (0.80)",
+      "question_types": ["Audio-Visual Stitching", "General Holistic Reasoning"],
+      "priority": 0.720
+    },
+    {
+      "timestamp": 366.3,
+      "reason": "Woman in blue paint + 1 object + 5 people + indoor_medium scene + unusual visual context",
+      "question_types": ["Context", "Inference", "Counting"],
+      "priority": 0.75
+    },
+    {
+      "timestamp": 387.7,
+      "reason": "Gap fill 366s→400s + highlight (0.693) + audio (0.66) + semantic (0.95)",
+      "question_types": ["Temporal Understanding", "Sequential"],
+      "priority": 0.693
+    },
+    {
+      "timestamp": 400.9,
+      "reason": "Highlight (0.730) + audio (0.66) + visual (1.00) + semantic (0.90)",
+      "question_types": ["Audio-Visual Stitching", "General Holistic Reasoning"],
+      "priority": 0.730
+    },
+    {
+      "timestamp": 409.0,
+      "reason": "Strong highlight (0.760) + audio (0.71) + visual (1.00) + semantic (0.95)",
+      "question_types": ["Audio-Visual Stitching", "Temporal Understanding"],
+      "priority": 0.760
+    },
+    {
+      "timestamp": 417.1,
+      "reason": "Highlight (0.735) + audio (0.71) + visual (1.00) + semantic (0.88)",
+      "question_types": ["Audio-Visual Stitching", "General Holistic Reasoning"],
+      "priority": 0.735
+    },
+    {
+      "timestamp": 422.6,
+      "reason": "Highlight (0.749) + audio (0.71) + visual (1.00) + semantic (0.92)",
+      "question_types": ["Audio-Visual Stitching", "Temporal Understanding"],
+      "priority": 0.749
+    },
+    {
+      "timestamp": 435.5,
+      "reason": "Dense cluster start + door handle interaction + 2 objects + 5 people + unknown scene",
+      "question_types": ["Subscene", "Referential Grounding", "Object Interaction Reasoning", "Context"],
+      "priority": 0.75
+    },
+    {
+      "timestamp": 438.3,
+      "reason": "Dense cluster + text detected: 'VEirieou' + blue glove + blue light + 2 objects + 5 people",
+      "question_types": ["Subscene", "Needle", "Referential Grounding", "Object Interaction Reasoning"],
+      "priority": 0.75
+    },
+    {
+      "timestamp": 439.3,
+      "reason": "Dense cluster + blue glove pointing at light switch + 2 objects + 5 people + continuous action",
+      "question_types": ["Subscene", "Referential Grounding", "Object Interaction Reasoning", "Sequential"],
+      "priority": 0.75
+    },
+    {
+      "timestamp": 445.0,
+      "reason": "Dense cluster end + highlight (0.739) + audio (0.64) + visual (0.99) + semantic (0.95)",
+      "question_types": ["Subscene", "Audio-Visual Stitching", "Temporal Understanding"],
+      "priority": 0.739
+    },
+    {
+      "timestamp": 466.2,
+      "reason": "Highlight (0.705) + audio (0.56) + visual (1.00) + semantic (0.90)",
+      "question_types": ["Audio-Visual Stitching", "General Holistic Reasoning"],
+      "priority": 0.705
+    },
+    {
+      "timestamp": 468.7,
+      "reason": "Woman in blue car + 1 object + 5 people + indoor_dim scene + scene transition",
+      "question_types": ["Context", "Comparative", "Counting"],
+      "priority": 0.75
+    },
+    {
+      "timestamp": 472.7,
+      "reason": "Highlight (0.699) + audio (0.65) + visual (1.00) + semantic (0.82)",
+      "question_types": ["Audio-Visual Stitching", "Temporal Understanding"],
+      "priority": 0.699
+    },
+    {
+      "timestamp": 498.8,
+      "reason": "Black cat flying in sky + indoor_dim scene + highly anomalous context (flying cat indoors)",
+      "question_types": ["Tackling Spurious Correlations", "Context", "Inference"],
+      "priority": 0.50
+    }
+  ],
+  "dense_clusters": [
+    {
+      "start": 435.5,
+      "end": 445.0,
+      "frame_count": 4,
+      "reason": "Door interaction sequence: handle (435.5s) → glove+light (438.3s) → pointing at switch (439.3s) → completion (445.0s), continuous action within 9.5s"
+    }
+  ],
+  "coverage": {
+    "covered_types": 13,
+    "total_types": 13,
+    "missing_types": [],
+    "coverage_ratio": 1.0
+  }
+}
+```

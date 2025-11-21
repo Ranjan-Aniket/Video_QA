@@ -297,7 +297,125 @@ class SmartFrameExtractorEnhanced:
         logger.info("=" * 80)
         
         return extracted_frames
-    
+
+    def extract_from_selection_plan(self, selection_plan: Dict) -> List[ExtractedFrame]:
+        """
+        Extract frames based on LLM selection plan from llm_frame_selector.
+
+        Args:
+            selection_plan: {
+                'selection_plan': [list of single frames],
+                'dense_clusters': [list of dense clusters]
+            }
+
+        Returns:
+            List of extracted frames
+        """
+        logger.info("=" * 80)
+        logger.info("EXTRACTING FRAMES FROM LLM SELECTION PLAN")
+        logger.info("=" * 80)
+
+        extracted_frames = []
+
+        # Extract single frames
+        single_frames = selection_plan.get('selection_plan', [])
+        logger.info(f"\n📍 Step 1: Extracting {len(single_frames)} single frames...")
+
+        for i, frame_plan in enumerate(single_frames):
+            timestamp = frame_plan['timestamp']
+            reason = frame_plan.get('reason', 'LLM selected')
+            question_types = frame_plan.get('question_types', [])
+            priority = frame_plan.get('priority', 0.5)
+
+            # Validate timestamp
+            if timestamp < 0 or timestamp > self.duration:
+                logger.warning(f"   ✗ Skipping frame {i}: invalid timestamp {timestamp:.1f}s")
+                continue
+
+            frame_id = f"single_{i:03d}"
+
+            frame = self._extract_frame_at_timestamp(
+                timestamp=timestamp,
+                frame_id=frame_id,
+                frame_type="single",
+                priority="critical" if priority > 0.8 else "high",
+                opportunity_type=f"llm_selected_{i}",
+                reason=f"{reason} | Types: {', '.join(question_types[:2])}",
+                is_key_frame=True  # All LLM-selected frames are key frames
+            )
+
+            if frame:
+                extracted_frames.append(frame)
+
+                if (i + 1) % 10 == 0:
+                    logger.info(f"   Progress: {i+1}/{len(single_frames)} single frames")
+
+        logger.info(f"   ✓ Extracted {len(extracted_frames)} single frames")
+
+        # Extract dense clusters
+        dense_clusters = selection_plan.get('dense_clusters', [])
+        logger.info(f"\n📍 Step 2: Extracting {len(dense_clusters)} dense clusters...")
+
+        cluster_frame_count = 0
+        for cluster_idx, cluster in enumerate(dense_clusters):
+            start_time = cluster['start']
+            end_time = cluster['end']
+            frame_count = cluster['frame_count']
+            reason = cluster.get('reason', 'Dense activity region')
+
+            # Calculate interval
+            duration = end_time - start_time
+            interval = duration / max(frame_count - 1, 1) if frame_count > 1 else 0
+
+            cluster_id = f"cluster_{cluster_idx:02d}"
+
+            logger.info(f"   Cluster {cluster_idx+1}: {frame_count} frames from {start_time:.1f}s to {end_time:.1f}s")
+
+            for i in range(frame_count):
+                timestamp = start_time + (i * interval)
+
+                # Skip if out of bounds
+                if timestamp < 0 or timestamp > self.duration:
+                    continue
+
+                frame_id = f"{cluster_id}_frame_{i:02d}"
+
+                # Mark middle frame as key frame
+                is_key = (i == frame_count // 2)
+
+                frame = self._extract_frame_at_timestamp(
+                    timestamp=timestamp,
+                    frame_id=frame_id,
+                    frame_type="cluster",
+                    priority="critical" if is_key else "medium",
+                    opportunity_type=f"dense_cluster_{cluster_idx}",
+                    reason=f"{reason} | Frame {i+1}/{frame_count}" + (" [KEY]" if is_key else ""),
+                    is_key_frame=is_key,
+                    cluster_id=cluster_id,
+                    cluster_position=i
+                )
+
+                if frame:
+                    extracted_frames.append(frame)
+                    cluster_frame_count += 1
+
+        logger.info(f"   ✓ Extracted {cluster_frame_count} cluster frames")
+
+        # Summary
+        total = len(extracted_frames)
+        single = len([f for f in extracted_frames if f.frame_type == "single"])
+        cluster = len([f for f in extracted_frames if f.frame_type == "cluster"])
+        key_frames = [f for f in extracted_frames if f.is_key_frame]
+
+        logger.info("=" * 80)
+        logger.info(f"✅ EXTRACTED {total} FRAMES FROM LLM SELECTION")
+        logger.info(f"   Single frames: {single}")
+        logger.info(f"   Cluster frames: {cluster}")
+        logger.info(f"   KEY frames (for AI): {len(key_frames)}")
+        logger.info("=" * 80)
+
+        return extracted_frames
+
     def _extract_frame_at_timestamp(
         self,
         timestamp: float,
