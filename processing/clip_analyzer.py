@@ -211,54 +211,149 @@ class CLIPAnalyzer:
     def analyze_frames(
         self,
         frames: List[Dict],
-        video_path: str
+        video_path: str,
+        batch_size: int = 32
     ) -> List[FrameEmbedding]:
         """
-        Generate embeddings for all frames
+        Generate embeddings for all frames with batching
 
         Args:
             frames: List of frame metadata dicts
             video_path: Path to video file
+            batch_size: Number of frames to process in each batch
 
         Returns:
             List of FrameEmbedding objects
         """
-        logger.info(f"Generating CLIP embeddings for {len(frames)} frames...")
+        logger.info(f"Generating CLIP embeddings for {len(frames)} frames (batch_size={batch_size})...")
 
         frame_embeddings = []
         cap = cv2.VideoCapture(video_path)
 
-        for frame_meta in frames:
-            frame_id = frame_meta.get('frame_id', frame_meta.get('frame_number', 0))
-            timestamp = frame_meta.get('timestamp', 0)
+        if not cap.isOpened():
+            logger.error(f"Failed to open video file: {video_path}")
+            return frame_embeddings
 
-            # Seek to frame
-            cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
-            ret, frame = cap.read()
+        # Process in batches
+        for batch_idx in range(0, len(frames), batch_size):
+            batch = frames[batch_idx:batch_idx + batch_size]
+            batch_images = []
+            batch_metadata = []
 
-            if not ret:
-                logger.warning(f"Failed to read frame at {timestamp}s")
-                continue
+            # Read frames in batch
+            for frame_meta in batch:
+                frame_id = frame_meta.get('frame_id', frame_meta.get('frame_number', 0))
+                timestamp = frame_meta.get('timestamp', 0)
 
-            # Generate embedding
-            embedding = self.encode_image(frame)
+                try:
+                    # Seek to frame
+                    cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
+                    ret, frame = cap.read()
 
-            # Create FrameEmbedding
-            frame_emb = FrameEmbedding(
-                frame_id=frame_id,
-                timestamp=timestamp,
-                embedding=embedding,
-                scene_type=frame_meta.get('scene_type'),
-                has_ocr=bool(frame_meta.get('ocr_text')),
-                object_count=len(frame_meta.get('objects', []))
-            )
+                    if not ret:
+                        logger.warning(f"Failed to read frame at {timestamp}s")
+                        continue
 
-            frame_embeddings.append(frame_emb)
+                    # Validate frame is not empty
+                    if frame is None or frame.size == 0:
+                        logger.warning(f"Empty frame at {timestamp}s")
+                        continue
+
+                    batch_images.append(frame)
+                    batch_metadata.append({
+                        'frame_id': frame_id,
+                        'timestamp': timestamp,
+                        'scene_type': frame_meta.get('scene_type'),
+                        'has_ocr': bool(frame_meta.get('ocr_text')),
+                        'object_count': len(frame_meta.get('objects', []))
+                    })
+                except Exception as e:
+                    logger.warning(f"Error reading frame {frame_id} at {timestamp}s: {e}")
+                    continue
+
+            # Batch encode images
+            if batch_images:
+                try:
+                    embeddings = self._encode_image_batch(batch_images)
+
+                    # Create FrameEmbedding objects
+                    for meta, embedding in zip(batch_metadata, embeddings):
+                        frame_emb = FrameEmbedding(
+                            frame_id=meta['frame_id'],
+                            timestamp=meta['timestamp'],
+                            embedding=embedding,
+                            scene_type=meta['scene_type'],
+                            has_ocr=meta['has_ocr'],
+                            object_count=meta['object_count']
+                        )
+                        frame_embeddings.append(frame_emb)
+                except Exception as e:
+                    logger.error(f"Error encoding batch at index {batch_idx}: {e}")
+                    # Continue to next batch instead of failing completely
+                    continue
+
+            # Progress logging
+            progress = min(batch_idx + batch_size, len(frames))
+            logger.info(f"Progress: {progress}/{len(frames)} frames processed ({progress*100//len(frames)}%)")
+
+            # Clear memory
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         cap.release()
         logger.info(f"Generated {len(frame_embeddings)} frame embeddings")
 
         return frame_embeddings
+
+    def _encode_image_batch(self, images: List[np.ndarray]) -> List[np.ndarray]:
+        """
+        Encode multiple images in a batch
+
+        Args:
+            images: List of OpenCV images (BGR)
+
+        Returns:
+            List of normalized embedding vectors
+        """
+        # Preprocess all images
+        image_tensors = []
+        for i, image in enumerate(images):
+            try:
+                # Validate image
+                if image is None or image.size == 0:
+                    logger.warning(f"Skipping invalid image at index {i}")
+                    continue
+
+                # Convert BGR to RGB
+                image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                pil_image = Image.fromarray(image_rgb)
+                image_tensor = self.preprocess(pil_image)
+                image_tensors.append(image_tensor)
+            except Exception as e:
+                logger.warning(f"Error preprocessing image {i}: {e}")
+                continue
+
+        if not image_tensors:
+            logger.error("No valid images to encode in batch")
+            return []
+
+        # Stack into batch
+        batch_tensor = torch.stack(image_tensors).to(self.device)
+
+        # Encode batch
+        with torch.no_grad():
+            if self.use_siglip and OPEN_CLIP_AVAILABLE:
+                image_features = self.model.encode_image(batch_tensor)
+            else:
+                image_features = self.model.encode_image(batch_tensor)
+
+        # Normalize
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+
+        # Convert to list of numpy arrays
+        embeddings = image_features.cpu().numpy()
+
+        return [emb for emb in embeddings]
 
     def analyze_transcript(
         self,
