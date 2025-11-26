@@ -30,6 +30,9 @@ python -m spacy download en_core_web_sm
 # Create .env file
 echo "⚙️  Creating .env file..."
 cat > .env << 'EOF'
+# Database (SQLite - no PostgreSQL needed!)
+DATABASE_URL=sqlite:///./video_qa.db
+
 # API Keys
 OPENAI_API_KEY=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
 ANTHROPIC_API_KEY=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
