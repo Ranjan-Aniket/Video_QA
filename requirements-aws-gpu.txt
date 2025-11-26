@@ -1,0 +1,145 @@
+# ============================================================================
+# GEMINI Q&A SYSTEM - AWS GPU REQUIREMENTS
+# For g4dn/g5 instances with NVIDIA GPUs
+# Python 3.9-3.11 Compatible
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# CORE PYTHON DEPENDENCIES
+# ----------------------------------------------------------------------------
+python-dotenv>=1.0.0
+pydantic>=2.5.0,<3.0
+pydantic-settings>=2.1.0
+jsonschema>=4.21.0
+
+# ----------------------------------------------------------------------------
+# WEB FRAMEWORK & API
+# ----------------------------------------------------------------------------
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.6
+websockets>=12.0
+aiofiles>=23.0.0
+
+# ----------------------------------------------------------------------------
+# DATABASE
+# ----------------------------------------------------------------------------
+psycopg2-binary>=2.9.0
+sqlalchemy>=2.0.0,<3.0
+alembic>=1.13.0
+
+# ----------------------------------------------------------------------------
+# AI/ML - PRIMARY LLM PROVIDERS
+# ----------------------------------------------------------------------------
+openai>=1.10.0
+google-generativeai>=0.3.0
+anthropic>=0.15.0
+instructor>=0.4.0
+
+# ----------------------------------------------------------------------------
+# AI/ML - GPU ENABLED PYTORCH & MODELS
+# ----------------------------------------------------------------------------
+torch>=2.1.0
+torchvision>=0.16.0
+torchaudio>=2.1.0
+transformers>=4.36.0
+sentence-transformers>=2.3.0
+timm>=0.9.0
+
+# ----------------------------------------------------------------------------
+# AUDIO PROCESSING
+# ----------------------------------------------------------------------------
+openai-whisper>=20231117
+librosa>=0.10.0
+soundfile>=0.12.0
+noisereduce>=3.0.0
+pyannote.audio>=3.0.0
+
+# ----------------------------------------------------------------------------
+# VIDEO/IMAGE PROCESSING
+# ----------------------------------------------------------------------------
+opencv-python-headless>=4.9.0  # Headless for server (no GUI)
+Pillow>=10.0.0
+ffmpeg-python>=0.2.0
+yt-dlp  # YouTube video download
+pytesseract>=0.3.10
+easyocr>=1.7.0
+ultralytics>=8.1.0  # YOLOv8
+scenedetect[opencv]>=0.6.0
+imagehash
+
+# CLIP models
+git+https://github.com/openai/CLIP.git
+open_clip_torch>=2.23.0
+
+# ----------------------------------------------------------------------------
+# NLP & TEXT PROCESSING
+# ----------------------------------------------------------------------------
+spacy>=3.7.0
+fuzzywuzzy>=0.18.0
+python-Levenshtein>=0.21.0
+
+# ----------------------------------------------------------------------------
+# DATA PROCESSING
+# ----------------------------------------------------------------------------
+pandas>=2.2.0
+numpy>=1.26.0,<2.0.0
+scipy>=1.11.0
+openpyxl>=3.1.0
+pyarrow>=14.0.0
+
+# ----------------------------------------------------------------------------
+# HTTP & NETWORKING
+# ----------------------------------------------------------------------------
+httpx>=0.26.0
+requests>=2.31.0
+aiohttp>=3.9.3
+tenacity>=8.2.0
+backoff>=2.2.0
+
+# ----------------------------------------------------------------------------
+# UTILITIES
+# ----------------------------------------------------------------------------
+tqdm>=4.66.0
+loguru>=0.7.0
+python-json-logger>=2.0.0
+rich>=13.7.0
+colorlog>=6.8.0
+python-dateutil>=2.8.0
+pytz>=2024.1
+click>=8.1.0
+pyyaml>=6.0.0
+
+# ----------------------------------------------------------------------------
+# MODAL (Optional - for cloud deployment)
+# ----------------------------------------------------------------------------
+modal>=0.55.0
+
+# ============================================================================
+# AWS GPU INSTALLATION
+# ============================================================================
+#
+# On AWS g4dn/g5 instance (Ubuntu):
+#
+# 1. Update system:
+#    sudo apt-get update && sudo apt-get upgrade -y
+#
+# 2. Install system dependencies:
+#    sudo apt-get install -y ffmpeg tesseract-ocr git wget curl
+#
+# 3. Install Python dependencies:
+#    pip install -r requirements-aws-gpu.txt
+#
+# 4. Download spacy model:
+#    python -m spacy download en_core_web_sm
+#
+# 5. Set environment variables:
+#    export OPENAI_API_KEY="your-key"
+#    export ANTHROPIC_API_KEY="your-key"
+#    export HF_TOKEN="your-huggingface-token"  # For pyannote
+#
+# 6. Verify GPU:
+#    nvidia-smi
+#    python -c "import torch; print(torch.cuda.is_available())"
+#
+# ============================================================================
