@@ -175,6 +175,7 @@ class PoseDetector:
             self.mp_drawing_styles = mp.solutions.drawing_styles
 
             self.holistic = self.mp_holistic.Holistic(
+                static_image_mode=True,  # Process each frame independently (fixes NORM_RECT warning)
                 min_detection_confidence=self.min_detection_confidence,
                 min_tracking_confidence=self.min_tracking_confidence,
                 model_complexity=self.model_complexity

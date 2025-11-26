@@ -172,14 +172,32 @@ class OCRProcessor:
         try:
             from paddleocr import PaddleOCR
 
-            # Initialize PaddleOCR with English language
-            self.ocr_engine = PaddleOCR(
-                use_angle_cls=True,  # Enable text angle classification
-                lang='en',  # English
-                show_log=False,  # Suppress PaddleOCR logging
-                use_gpu=False  # Use CPU (set True if GPU available)
-            )
-            logger.info("PaddleOCR engine initialized")
+            # Auto-detect GPU availability for PaddleOCR
+            use_gpu = False
+            try:
+                import torch
+                use_gpu = torch.cuda.is_available()
+            except ImportError:
+                pass
+
+            # Initialize PaddleOCR with English language + GPU if available
+            ocr_config = {
+                'use_angle_cls': False,  # Disable angle classification for speed
+                'lang': 'en',  # English
+                'show_log': False,  # Suppress PaddleOCR logging
+                'use_gpu': use_gpu,  # Auto-detected GPU (10x speedup if available)
+                'enable_mkldnn': True,  # Intel MKL-DNN optimization for CPU
+            }
+
+            # Only set gpu_mem if GPU is available
+            if use_gpu:
+                ocr_config['gpu_mem'] = 2000  # Allocate 2GB GPU memory
+                logger.info("PaddleOCR initializing with GPU acceleration")
+            else:
+                logger.info("PaddleOCR initializing in CPU mode")
+
+            self.ocr_engine = PaddleOCR(**ocr_config)
+            logger.info(f"PaddleOCR engine initialized ({'GPU' if use_gpu else 'CPU'} mode)")
         except ImportError:
             logger.warning("PaddleOCR not available. Install with: pip install paddleocr")
             self.ocr_engine = None

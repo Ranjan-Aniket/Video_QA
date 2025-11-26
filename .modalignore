@@ -1,0 +1,90 @@
+# Modal Ignore File - Exclude from container image
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Outputs (will be in persistent volume)
+outputs/
+downloaded_outputs/
+
+# Large model files (will be downloaded in container)
+models/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Media files (will be processed from URLs)
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.wav
+*.mp3
+
+# Documentation
+*.md
+docs/
+
+# Testing
+tests/
+*.pytest_cache/
+.coverage
+
+# Frontend
+frontend/
+gemini/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Logs
+*.log
+logs/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Thumbnails
+._*
+
+# Files that might appear in the root
+.env
+.env.local
+*.xlsx
+*.csv
+videos.txt
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Node modules (if any)
+node_modules/

@@ -85,14 +85,12 @@ class SubsceneTemplate(QuestionTemplate):
             if not audio_segment:
                 continue
             
-            audio_text = audio_segment['text'][:60]
-            if len(audio_segment['text']) > 60:
-                audio_text += "..."
-            
+            audio_text = self.get_audio_quote_for_question(audio_segment, max_length=70)
+
             # Generate question
             question = (
-                f'Describe what happens when {marker} is shown and someone says '
-                f'"{audio_text}"?'
+                f'Describe what happens when {marker} is shown and the audio cue '
+                f'"{audio_text}" is heard?'
             )
             
             # Generate answer from events
@@ -206,14 +204,12 @@ class HolisticReasoningTemplate(QuestionTemplate):
                     )
                     
                     if changes_during >= 2:
-                        audio_text = audio_segment['text'][:60]
-                        if len(audio_segment['text']) > 60:
-                            audio_text += "..."
-                        
+                        audio_text = self.get_audio_quote_for_question(audio_segment, max_length=70)
+
                         # Generate question
                         question = (
                             f'What is the purpose of the rapid scene changes while '
-                            f'someone says "{audio_text}"?'
+                            f'the audio cue "{audio_text}" is heard?'
                         )
                         
                         answer = (
@@ -291,13 +287,11 @@ class AudioVisualStitchingTemplate(QuestionTemplate):
             ]
             
             if changes_during:
-                audio_text = audio_segment['text'][:60]
-                if len(audio_segment['text']) > 60:
-                    audio_text += "..."
-                
+                audio_text = self.get_audio_quote_for_question(audio_segment, max_length=70)
+
                 # Generate question
                 question = (
-                    f'When someone says "{audio_text}", does the scene change '
+                    f'When the audio cue "{audio_text}" is heard, does the scene change '
                     f'or remain continuous?'
                 )
                 
@@ -404,18 +398,16 @@ class SpuriousCorrelationsTemplate(QuestionTemplate):
             )
             obj_desc = DescriptorGenerator.generate_object_descriptor(visual_evidence)
             
-            audio_text = audio_segment['text'][:80]
-            if len(audio_segment['text']) > 80:
-                audio_text += "..."
-            
+            audio_text = self.get_audio_quote_for_question(audio_segment, max_length=80)
+
             # Generate question
             question = (
-                f'When someone says "{audio_text}", what are they referring to '
-                f'based on what is shown on screen?'
+                f'When the audio cue "{audio_text}" is heard, what visual element '
+                f'is being referenced based on what is shown on screen?'
             )
-            
+
             answer = (
-                f'They are referring to the {obj_desc} that is shown on screen '
+                f'The audio cue is referring to the {obj_desc} that is shown on screen '
                 f'at this moment.'
             )
             

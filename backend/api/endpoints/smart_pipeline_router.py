@@ -202,7 +202,9 @@ async def get_pipeline_status(video_id: str):
     try:
         # NEW: Check outputs directory directly without database lookup
         # This allows status checks for videos not in the database
-        output_dir = Path("uploads/outputs")
+        # NOTE: video_id is typically "video_YYYYMMDD_HHMMSS_OriginalName"
+        # and the output_dir is "outputs/video_YYYYMMDD_HHMMSS_OriginalName/"
+        output_dir = Path("outputs") / video_id
 
         if not output_dir.exists():
             return {
@@ -213,66 +215,68 @@ async def get_pipeline_status(video_id: str):
                 "phases_complete": []
             }
 
-        # video_stem is the base filename (video_id without extension)
-        video_stem = video_id.replace(".mp4", "")
-
-        # Check which phases are complete (NEW 9-PHASE PIPELINE)
+        # Check which phases are complete (Pass 1-2B Architecture)
         phases_complete = []
 
         # Phase 1: Audio + Scene + Quality
-        if (output_dir / f"{video_stem}_phase1_audio_scene_quality.json").exists():
+        if list(output_dir.glob("*_phase1_audio_scene_quality.json")):
             phases_complete.append("audio_analysis")
 
-        # Phase 2: Visual Samples
-        if (output_dir / f"{video_stem}_phase2_visual_samples.json").exists():
+        # Phase 2: Visual Sampling
+        if list(output_dir.glob("*_phase2_visual_samples.json")):
             phases_complete.append("visual_sampling")
 
-        # Phase 3: Highlights
-        if (output_dir / f"{video_stem}_phase3_highlights.json").exists():
-            phases_complete.append("highlight_detection")
+        # CLIP Analysis
+        if list(output_dir.glob("*_clip_analysis.json")):
+            phases_complete.append("clip_analysis")
 
-        # Phase 4: Frame Budget
-        if (output_dir / f"{video_stem}_phase4_frame_budget.json").exists():
-            phases_complete.append("frame_budget")
+        # Pass 1: Smart Pre-Filter
+        if list(output_dir.glob("*_pass1_filtered_frames.json")):
+            phases_complete.append("pass1_filter")
 
-        # Phase 5: Frame Selection
-        if (output_dir / f"{video_stem}_phase5_frame_selection.json").exists():
-            phases_complete.append("frame_selection")
+        # Pass 2A: Sonnet 4.5 Moments
+        if list(output_dir.glob("*_pass2a_sonnet_moments.json")):
+            phases_complete.append("pass2a_moments")
 
-        # Phase 6: Frame Extraction
-        if (output_dir / "frames" / video_stem / "frames_metadata.json").exists():
-            phases_complete.append("frame_extraction")
+        # Pass 2B: Opus 4 Moments
+        if list(output_dir.glob("*_pass2b_opus_moments.json")):
+            phases_complete.append("pass2b_moments")
 
-        # Phase 7: Evidence Extraction
-        if (output_dir / f"{video_stem}_phase7_evidence.json").exists():
-            phases_complete.append("evidence_extraction")
+        # Validation
+        if list(output_dir.glob("*_validated_moments.json")):
+            phases_complete.append("validation")
 
-        # Phase 8: Question Generation
-        if (output_dir / f"{video_stem}_phase8_questions.json").exists():
+        # Pass 3: QA Generation
+        if list(output_dir.glob("*_pass3_qa_pairs.json")):
             phases_complete.append("question_generation")
 
-        # Calculate progress (8 total phases)
-        total_phases = 8
+        # Phase 9: Gemini Testing
+        if list(output_dir.glob("*_phase9_gemini_results.json")):
+            phases_complete.append("gemini_testing")
+
+        # Calculate progress (9 total phases in Pass 1-2B architecture)
+        total_phases = 9
         progress = len(phases_complete) / total_phases
 
         # Determine status
         if len(phases_complete) == 0:
             status = "pending"
             current_phase = "Not started"
-        elif len(phases_complete) == total_phases:
+        elif len(phases_complete) >= 8:  # Complete at Pass 3 (Phase 9 is optional)
             status = "completed"
-            current_phase = "All phases complete"
+            current_phase = "Pipeline complete"
         else:
             status = "processing"
             phase_names = {
-                1: "Phase 1: Audio + Scene + Quality",
-                2: "Phase 2: Visual Sampling",
-                3: "Phase 3: Highlight Detection",
-                4: "Phase 4: Frame Budget",
-                5: "Phase 5: Frame Selection (LLM)",
-                6: "Phase 6: Frame Extraction",
-                7: "Phase 7: Evidence Extraction",
-                8: "Phase 8: Question Generation"
+                1: "Phase 1: Audio + Scene Analysis",
+                2: "Phase 2: Visual Sampling (Scene/FPS)",
+                3: "CLIP Analysis",
+                4: "Pass 1: Smart Pre-Filter",
+                5: "Pass 2A: Sonnet 4.5 Moments",
+                6: "Pass 2B: Opus 4 Moments",
+                7: "Validation",
+                8: "Pass 3: QA Generation",
+                9: "Phase 9: Gemini Testing"
             }
             current_phase = phase_names.get(len(phases_complete) + 1, f"Phase {len(phases_complete) + 1}")
 
@@ -296,8 +300,10 @@ async def get_audio_analysis(video_id: str):
         # NEW: Check outputs directory directly without database lookup
         output_dir = Path("outputs") / video_id
 
-        # Find audio analysis file
-        json_files = list(output_dir.glob("*_audio_analysis.json"))
+        # Find audio analysis file (try Phase 1 first, then old format)
+        json_files = list(output_dir.glob("*_phase1_audio_scene_quality.json"))
+        if not json_files:
+            json_files = list(output_dir.glob("*_audio_analysis.json"))
         if not json_files:
             raise HTTPException(status_code=404, detail="Audio analysis not found")
 
@@ -308,11 +314,11 @@ async def get_audio_analysis(video_id: str):
             analysis = json.load(f)
 
         return AudioAnalysisResponse(
-            transcript=analysis["transcript"][:500] + "...",  # Truncate for response
-            duration=analysis["duration"],
-            segments_count=len(analysis["segments"]),
-            speaker_count=analysis["speaker_count"],
-            language=analysis["language"]
+            transcript=analysis.get("transcript", "")[:500] + "...",  # Truncate for response
+            duration=analysis.get("duration", 0.0),
+            segments_count=len(analysis.get("segments", [])),
+            speaker_count=analysis.get("speaker_count", 0),
+            language=analysis.get("language", "unknown")
         )
 
     except HTTPException:
@@ -367,9 +373,26 @@ async def get_frame_extraction(video_id: str):
     try:
         # NEW: Check outputs directory directly without database lookup
         output_dir = Path("outputs") / video_id
-        frames_base = output_dir / "frames"
 
-        # Find frames metadata file (search all subdirectories)
+        # Try Phase 5 checkpoint first
+        phase5_files = list(output_dir.glob("*_phase5_frame_selection.json"))
+
+        if phase5_files:
+            # Load Phase 5 checkpoint
+            with open(phase5_files[0], 'r') as f:
+                phase5_data = json.load(f)
+
+            frames = phase5_data.get("selection_plan", [])
+
+            return FrameExtractionResponse(
+                total_frames=len(frames),
+                premium_frames=0,  # Phase 5 doesn't categorize by type
+                template_frames=0,
+                bulk_frames=len(frames)
+            )
+
+        # Fall back to old format
+        frames_base = output_dir / "frames"
         metadata_files = list(frames_base.glob("*/frames_metadata.json"))
         if not metadata_files:
             raise HTTPException(status_code=404, detail="Frame extraction results not found")

@@ -26,9 +26,15 @@ logger = logging.getLogger(__name__)
 
 class QuickVisualSampler:
     """Sample frames and run FREE models for visual context"""
-    
-    def __init__(self):
-        """Initialize sampler and load models"""
+
+    def __init__(self, enable_blip2: bool = False):
+        """
+        Initialize sampler and load models
+
+        Args:
+            enable_blip2: Enable BLIP-2 captioning (SLOW - 90s/frame, adds 2+ hours)
+        """
+        self.enable_blip2 = enable_blip2
         self.models_loaded = False
         self._load_models()
     
@@ -36,19 +42,41 @@ class QuickVisualSampler:
         """Load all FREE models"""
         try:
             # Import all processors
-            from .blip2_processor import BLIP2Processor
             from .clip_processor import CLIPProcessor
             from .places365_processor import Places365Processor
             from .object_detector import ObjectDetector
             from .ocr_processor import OCRProcessor
             from .pose_detector import PoseDetector
-            
-            self.blip2 = BLIP2Processor()
-            self.clip = CLIPProcessor()
-            self.places365 = Places365Processor()
-            self.yolo = ObjectDetector()
-            self.ocr = OCRProcessor()
-            self.pose = PoseDetector()
+
+            # Auto-detect GPU availability
+            gpu_available = False
+            try:
+                import torch
+                gpu_available = torch.cuda.is_available()
+                if gpu_available:
+                    logger.info(f"✅ GPU detected: {torch.cuda.get_device_name(0)}")
+                else:
+                    logger.info("ℹ️  No GPU detected - using CPU mode")
+            except ImportError:
+                logger.info("ℹ️  PyTorch not available - using CPU mode")
+
+            device = "cuda" if gpu_available else "cpu"
+
+            # BLIP-2 is OPTIONAL (very slow - 90s per frame!)
+            if self.enable_blip2:
+                from .blip2_processor import BLIP2Processor
+                self.blip2 = BLIP2Processor()
+                logger.info("⚠️  BLIP-2 enabled - expect 2+ hours for Phase 2")
+            else:
+                self.blip2 = None
+                logger.info("✓ BLIP-2 disabled - Phase 2 will be ~15 minutes instead of 2+ hours")
+
+            # Load models with auto-detected device
+            self.clip = CLIPProcessor(device=device)
+            self.places365 = Places365Processor()  # CPU only (no GPU support)
+            self.yolo = ObjectDetector(device=device)
+            self.ocr = OCRProcessor()  # GPU enabled in ocr_processor.py if available
+            self.pose = PoseDetector()  # MediaPipe auto-detects GPU
             
             # Optional: FER (if available)
             try:
@@ -69,19 +97,25 @@ class QuickVisualSampler:
         self,
         video_path: str,
         scenes: List[Dict],
-        min_quality: float = 0.0
+        min_quality: float = 0.0,
+        mode: str = "scene",  # "scene" or "fps"
+        fps_rate: float = 2.0,  # For fps mode: frames per second to extract
+        frames_output_dir: str = None  # Where to save extracted frames
     ) -> Dict:
         """
-        Sample 1 frame per scene and run all FREE models.
+        Sample frames and run all FREE models.
 
         Args:
             video_path: Path to video
             scenes: List of scene dicts from scene_detector
             min_quality: Minimum scene quality (0.0-1.0). Skip scenes below this (default: 0.0 = all scenes)
+            mode: "scene" for 1 frame per scene, "fps" for uniform FPS sampling
+            fps_rate: For fps mode, how many frames per second to extract (default: 2.0)
+            frames_output_dir: Directory to save extracted frame images (required for Pass 2A/2B)
 
         Returns:
             {
-                'samples': [list of analyzed frames],
+                'samples': [list of analyzed frames with frame_id and frame_path],
                 'total_sampled': int,
                 'skipped_low_quality': int
             }
@@ -89,40 +123,97 @@ class QuickVisualSampler:
         if not self.models_loaded:
             raise RuntimeError("Models not loaded. Check initialization.")
 
+        # Create frames output directory if specified
+        if frames_output_dir:
+            frames_dir = Path(frames_output_dir)
+            frames_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Saving frames to: {frames_dir}")
+        else:
+            frames_dir = None
+
         cap = cv2.VideoCapture(str(video_path))
         fps = cap.get(cv2.CAP_PROP_FPS)
+        video_duration = cap.get(cv2.CAP_PROP_FRAME_COUNT) / fps
 
         samples = []
         skipped_count = 0
 
-        logger.info(f"Sampling {len(scenes)} scenes with FREE models...")
-        if min_quality > 0:
-            logger.info(f"  Filtering scenes with quality < {min_quality:.2f}")
+        if mode == "fps":
+            # FPS Mode: Extract frames at uniform FPS rate
+            logger.info(f"Sampling at {fps_rate} FPS with FREE models...")
 
-        for scene in scenes:
-            # Skip low-quality scenes if threshold set
-            scene_quality = scene.get('avg_quality', 1.0)
-            if scene_quality < min_quality:
-                skipped_count += 1
-                continue
-            # Pick middle of scene
-            mid_timestamp = (scene['start'] + scene['end']) / 2
-            
-            # Extract frame
-            frame_num = int(mid_timestamp * fps)
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
-            ret, frame = cap.read()
-            
-            if not ret:
-                continue
-            
-            # Run all FREE models on this frame
-            analysis = self._analyze_frame(frame, mid_timestamp)
-            samples.append(analysis)
-            
-            if len(samples) % 10 == 0:
-                logger.info(f"Processed {len(samples)}/{len(scenes)} samples...")
-        
+            # Calculate timestamps
+            interval = 1.0 / fps_rate
+            timestamps = np.arange(0, video_duration, interval)
+
+            logger.info(f"Will extract ~{len(timestamps)} frames")
+
+            for i, timestamp in enumerate(timestamps):
+                # Extract frame
+                frame_num = int(timestamp * fps)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+                ret, frame = cap.read()
+
+                if not ret:
+                    continue
+
+                # Quality check
+                quality = self._assess_quality(frame)
+                if quality < min_quality:
+                    skipped_count += 1
+                    continue
+
+                # Save frame to disk if output directory specified
+                frame_path = None
+                if frames_dir:
+                    frame_filename = f"frame_{frame_num:06d}.jpg"
+                    frame_path = frames_dir / frame_filename
+                    cv2.imwrite(str(frame_path), frame)
+
+                # Run all FREE models on this frame
+                analysis = self._analyze_frame(frame, timestamp, frame_num, frame_path)
+                samples.append(analysis)
+
+                if len(samples) % 100 == 0:
+                    logger.info(f"Processed {len(samples)}/{len(timestamps)} frames...")
+
+        else:
+            # Scene Mode: 1 frame per scene (original behavior)
+            logger.info(f"Sampling {len(scenes)} scenes with FREE models...")
+            if min_quality > 0:
+                logger.info(f"  Filtering scenes with quality < {min_quality:.2f}")
+
+            for scene in scenes:
+                # Skip low-quality scenes if threshold set
+                scene_quality = scene.get('avg_quality', 1.0)
+                if scene_quality < min_quality:
+                    skipped_count += 1
+                    continue
+                # Pick middle of scene
+                mid_timestamp = (scene['start'] + scene['end']) / 2
+
+                # Extract frame
+                frame_num = int(mid_timestamp * fps)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+                ret, frame = cap.read()
+
+                if not ret:
+                    continue
+
+                # Save frame to disk if output directory specified
+                frame_path = None
+                if frames_dir:
+                    frame_filename = f"frame_{frame_num:06d}.jpg"
+                    frame_path = frames_dir / frame_filename
+                    cv2.imwrite(str(frame_path), frame)
+
+                # Run all FREE models on this frame
+                analysis = self._analyze_frame(frame, mid_timestamp, frame_num, frame_path)
+                samples.append(analysis)
+
+                if len(samples) % 10 == 0:
+                    logger.info(f"Processed {len(samples)}/{len(scenes)} samples...")
+
         cap.release()
 
         logger.info(f"Completed: {len(samples)} frames analyzed with FREE models")
@@ -135,11 +226,13 @@ class QuickVisualSampler:
             'skipped_low_quality': skipped_count
         }
     
-    def _analyze_frame(self, frame, timestamp: float) -> Dict:
+    def _analyze_frame(self, frame, timestamp: float, frame_num: int, frame_path: Path = None) -> Dict:
         """Run all FREE models on single frame"""
 
-        # 1. BLIP-2: Generate caption
-        blip2_caption = self.blip2.generate_caption(frame)
+        # 1. BLIP-2: Generate caption (OPTIONAL - very slow!)
+        blip2_caption = None
+        if self.blip2:
+            blip2_caption = self.blip2.generate_caption(frame)
 
         # 2. CLIP: Extract embeddings + attributes
         clip_embedding = self.clip.encode_image(frame)
@@ -165,6 +258,8 @@ class QuickVisualSampler:
         quality = self._assess_quality(frame)
 
         return {
+            'frame_id': frame_num,  # Critical for Pass 2A to find the frame file
+            'frame_path': str(frame_path) if frame_path else None,
             'timestamp': timestamp,
             'blip2_caption': blip2_caption,
             'clip_embedding': clip_embedding.tolist() if clip_embedding is not None else [],

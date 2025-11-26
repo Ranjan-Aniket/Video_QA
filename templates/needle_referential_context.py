@@ -69,17 +69,15 @@ class NeedleTemplate(QuestionTemplate):
             if not audio_segment:
                 continue
             
-            # Get audio text
-            audio_text = audio_segment['text'][:60]
-            if len(audio_segment['text']) > 60:
-                audio_text += "..."
-            
+            # Get audio text (no truncation per guideline 12)
+            audio_text = self.get_audio_quote_for_question(audio_segment, max_length=70)
+
             # Get OCR location descriptor
             location = ocr.get('location', 'screen')
-            
+
             # Generate question
             question = (
-                f'What text appears on the {location} when someone says "{audio_text}"?'
+                f'What text appears on the {location} when the audio cue "{audio_text}" is heard?'
             )
             
             answer = f'The text "{ocr["text"]}" appears on the {location}.'
@@ -210,17 +208,16 @@ class ReferentialGroundingTemplate(QuestionTemplate):
             desc = DescriptorGenerator.generate_person_descriptor(visual_evidence)
             descriptors.append(desc)
         
-        # Get audio text
-        audio_text = audio_segment['text'][:60]
-        if len(audio_segment['text']) > 60:
-            audio_text += "..."
-        
-        # Generate question
+        # Get audio text (no truncation per guideline 12)
+        audio_text = self.get_audio_quote_for_question(audio_segment, max_length=70)
+
+        # Generate question - Use "which people" instead of "who"
         question = (
-            f'Who is visible on screen when someone says "{audio_text}"?'
+            f'Which people are visible on screen when the audio cue "{audio_text}" is heard?'
         )
-        
-        answer = f'{descriptors[0].capitalize()} and {descriptors[1]} are visible on screen.'
+
+        # Answer - Avoid pronoun patterns
+        answer = f'The {descriptors[0]} and the {descriptors[1]} are visible on screen.'
         
         # Create cues
         audio_cue = Cue(
@@ -377,11 +374,9 @@ class ContextTemplate(QuestionTemplate):
             if len(objects_at_time) < 2:
                 continue
             
-            # Get audio text
-            audio_text = audio_segment['text'][:60]
-            if len(audio_segment['text']) > 60:
-                audio_text += "..."
-            
+            # Get audio text (no truncation per guideline 12)
+            audio_text = self.get_audio_quote_for_question(audio_segment, max_length=70)
+
             # Generate object descriptors
             obj_descriptors = []
             for obj in objects_at_time[:3]:  # Max 3 objects
@@ -393,11 +388,11 @@ class ContextTemplate(QuestionTemplate):
                 )
                 desc = DescriptorGenerator.generate_object_descriptor(visual_evidence)
                 obj_descriptors.append(desc)
-            
+
             # Generate question
             question = (
                 f'What visual elements are present in the background when '
-                f'someone says "{audio_text}"?'
+                f'the audio cue "{audio_text}" is heard?'
             )
             
             answer = (

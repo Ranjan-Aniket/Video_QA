@@ -79,14 +79,12 @@ class TemporalUnderstandingTemplate(QuestionTemplate):
             if not event_descriptor or not next_event_descriptor:
                 continue
             
-            # Get audio text
-            audio_text = audio_segment['text'][:60]
-            if len(audio_segment['text']) > 60:
-                audio_text += "..."
-            
+            # Get audio text (no truncation per guideline 12)
+            audio_text = self.get_audio_quote_for_question(audio_segment, max_length=70)
+
             # Generate question
             question = (
-                f'What happens after someone says "{audio_text}" and we see '
+                f'What happens after the audio cue "{audio_text}" and we see '
                 f'{event_descriptor}?'
             )
             
@@ -234,14 +232,13 @@ class SequentialTemplate(QuestionTemplate):
         )
         if not audio_segment:
             return None
-        
-        audio_text = audio_segment['text'][:50]
-        if len(audio_segment['text']) > 50:
-            audio_text += "..."
-        
+
+        # Get audio text (no truncation per guideline 12)
+        audio_text = self.get_audio_quote_for_question(audio_segment, max_length=60)
+
         # Generate question with multiple choice
         question = (
-            f'After someone says "{audio_text}", what is the order of these events?\n'
+            f'After the audio cue "{audio_text}", what is the order of these events?\n'
             f'(A) {descriptors[0]}\n'
             f'(B) {descriptors[1]}\n'
             f'(C) {descriptors[2]}'

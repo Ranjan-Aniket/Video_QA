@@ -117,15 +117,13 @@ class ComparativeTemplate(QuestionTemplate):
                 )
                 person_desc_last = DescriptorGenerator.generate_person_descriptor(visual_evidence_last)
                 
-                # Get audio text
-                audio_text = audio_segment['text'][:60]
-                if len(audio_segment['text']) > 60:
-                    audio_text += "..."
-                
+                # Get audio text (no truncation per guideline 12)
+                audio_text = self.get_audio_quote_for_question(audio_segment, max_length=70)
+
                 # Generate question
                 question = (
                     f'What is the difference in the person\'s appearance before and '
-                    f'after someone says "{audio_text}"?'
+                    f'after the audio cue "{audio_text}"?'
                 )
                 
                 answer = (
@@ -235,13 +233,11 @@ class InferenceTemplate(QuestionTemplate):
             if not audio_segment:
                 continue
             
-            audio_text = audio_segment['text'][:60]
-            if len(audio_segment['text']) > 60:
-                audio_text += "..."
-            
+            audio_text = self.get_audio_quote_for_question(audio_segment, max_length=70)
+
             # Generate question
             question = (
-                f'Why does {desc_b} happen after someone says "{audio_text}" '
+                f'Why does {desc_b} happen after the audio cue "{audio_text}" '
                 f'and we see {desc_a}?'
             )
             
@@ -399,10 +395,8 @@ class ObjectInteractionTemplate(QuestionTemplate):
             if not audio_segment:
                 continue
             
-            audio_text = audio_segment['text'][:60]
-            if len(audio_segment['text']) > 60:
-                audio_text += "..."
-            
+            audio_text = self.get_audio_quote_for_question(audio_segment, max_length=70)
+
             # Generate object descriptors
             visual_evidence_first = VisualEvidence(
                 timestamp=first['timestamp'],
@@ -411,11 +405,11 @@ class ObjectInteractionTemplate(QuestionTemplate):
                 color=first.get('color')
             )
             obj_desc_first = DescriptorGenerator.generate_object_descriptor(visual_evidence_first)
-            
+
             # Generate question
             question = (
-                f'How does the {obj_class} change after someone says "{audio_text}" '
-                f'and performs an action?'
+                f'How does the {obj_class} change after the audio cue "{audio_text}" '
+                f'and an action is performed?'
             )
             
             answer = (

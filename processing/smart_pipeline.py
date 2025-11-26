@@ -41,8 +41,8 @@ PHASE 6: Targeted Frame Extraction
 - Cost: $0.00 (OpenCV)
 
 PHASE 7: Full Evidence Extraction
-- GPT-4o + Claude on key frames only
-- Cost: ~$0.94 (47 frames × $0.02)
+- Claude Vision (only) on key frames - optimized for cost
+- Cost: ~$0.12 (47 frames × $0.003 - Claude Vision pricing)
 
 PHASE 8: Question Generation + Validation
 - Claude Sonnet 4.5 for all question generation
@@ -92,6 +92,9 @@ from processing.smart_frame_extractor import SmartFrameExtractorEnhanced as Smar
 from processing.multimodal_question_generator_v2 import MultimodalQuestionGeneratorV2
 from processing.bulk_frame_analyzer import BulkFrameAnalyzer
 
+# NEW: Optimized Phase 8 (Direct Vision, Skip Phase 7)
+from processing.phase8_vision_generator import Phase8VisionGenerator
+
 # NEW: 9-Phase Architecture Components
 from processing.scene_detector_enhanced import SceneDetectorEnhanced
 from processing.quality_mapper import QualityMapper
@@ -102,7 +105,17 @@ from processing.llm_semantic_detector import LLMSemanticDetector
 from processing.universal_highlight_detector import UniversalHighlightDetector
 from processing.dynamic_frame_budget import DynamicFrameBudget
 from processing.llm_frame_selector import LLMFrameSelector
+from processing.content_moderator import ContentModerator, is_intro_outro
 import numpy as np
+
+# NEW: Pass 1-2B Architecture (Two-Pass Adversarial Moment Selection)
+from processing.clip_analyzer import run_clip_analysis
+from processing.pass1_smart_filter import run_pass1_filter
+from processing.pass2a_sonnet_selector import run_pass2a_selection
+from processing.pass2b_opus_selector import run_pass2b_selection
+from processing.moment_validator import run_validation
+from processing.pass3_qa_generator import run_qa_generation
+from processing.ontology_types import OFFICIAL_TYPES, normalize_type
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +161,7 @@ class AdversarialSmartPipeline:
         openai_api_key: Optional[str] = None,
         claude_api_key: Optional[str] = None,
         gemini_api_key: Optional[str] = None,
-        enable_checkpoints: bool = False,
+        enable_checkpoints: bool = True,
         show_progress: bool = True
     ):
         """
@@ -230,16 +243,16 @@ class AdversarialSmartPipeline:
     # ==================== CHECKPOINT METHODS ====================
 
     def _get_checkpoint_paths(self) -> Dict[str, Path]:
-        """Get all checkpoint file paths for 9-phase architecture"""
+        """Get all checkpoint file paths for new Pass 1-2B architecture"""
         return {
             "phase1": self.output_dir / f"{self.video_id}_phase1_audio_scene_quality.json",
             "phase2": self.output_dir / f"{self.video_id}_phase2_visual_samples.json",
-            "phase3": self.output_dir / f"{self.video_id}_phase3_highlights.json",
-            "phase4": self.output_dir / f"{self.video_id}_phase4_frame_budget.json",
-            "phase5": self.output_dir / f"{self.video_id}_phase5_frame_selection.json",
-            "phase6": self.output_dir / "frames" / self.video_id / "frames_metadata.json",
-            "phase7": self.output_dir / f"{self.video_id}_phase7_evidence.json",
-            "phase8": self.output_dir / f"{self.video_id}_phase8_questions.json",
+            "clip_analysis": self.output_dir / f"{self.video_id}_clip_analysis.json",
+            "pass1": self.output_dir / f"{self.video_id}_pass1_filtered_frames.json",
+            "pass2a": self.output_dir / f"{self.video_id}_pass2a_sonnet_moments.json",
+            "pass2b": self.output_dir / f"{self.video_id}_pass2b_opus_moments.json",
+            "validation": self.output_dir / f"{self.video_id}_validated_moments.json",
+            "pass3": self.output_dir / f"{self.video_id}_pass3_qa_pairs.json",
             "phase9": self.output_dir / f"{self.video_id}_phase9_gemini_results.json"
         }
 
@@ -292,36 +305,50 @@ class AdversarialSmartPipeline:
             return 1
 
         logger.info("\n" + "=" * 80)
-        logger.info("SCANNING FOR CHECKPOINTS (9-Phase Architecture)")
+        logger.info("SCANNING FOR CHECKPOINTS (Pass 1-2B Architecture)")
         logger.info("=" * 80)
 
         checkpoint_paths = self._get_checkpoint_paths()
 
-        # Define required fields for each checkpoint
+        # Define required fields for each checkpoint (Pass 1-2B Architecture)
         required_fields = {
-            "phase1": ["duration", "segments", "scenes", "quality_scores"],
-            "phase2": ["samples", "total_sampled"],
-            "phase3": ["highlights", "total_highlights"],
-            "phase4": ["recommended_frames", "budget_used"],
-            "phase5": ["selection_plan", "coverage"],
-            "phase6": ["total_frames", "frames"],
-            "phase7": ["frames", "evidence_count"],
-            "phase8": ["total_questions", "questions"],
-            "phase9": ["tested"]
+            "phase1": ["duration", "segments", "scenes"],  # Audio + Scene
+            "phase2": ["samples", "total_sampled"],  # Visual Sampling 2fps
+            "clip_analysis": ["spurious_candidates", "visual_anomalies"],  # CLIP Analysis
+            "pass1": ["selected_frames", "selection_breakdown"],  # Pass 1 Filter
+            "pass2a": ["mode1_precise"],  # Pass 2A (Sonnet moments)
+            "pass2b": ["mode3_inference_window"],  # Pass 2B (Opus moments)
+            "validation": ["validated_moments"],  # Moment validation
+            "pass3": ["qa_pairs"]  # Pass 3 (QA generation)
         }
+
+        # Define checkpoint order for Pass 1-2B Architecture
+        checkpoint_order = [
+            ("phase1", 1, "Audio + Scene Analysis"),
+            ("phase2", 2, "Visual Sampling 2fps"),
+            ("clip_analysis", 3, "CLIP Analysis"),
+            ("pass1", 4, "Pass 1 Filter"),
+            ("pass2a", 5, "Pass 2A Sonnet"),
+            ("pass2b", 6, "Pass 2B Opus"),
+            ("validation", 7, "Moment Validation"),
+            ("pass3", 8, "QA Generation")
+        ]
 
         last_valid_phase = 0
 
-        # Check each phase in order
-        for phase_num in range(1, 10):
-            phase_key = f"phase{phase_num}"
-            checkpoint_path = checkpoint_paths[phase_key]
+        # Check each checkpoint in order
+        for checkpoint_key, phase_num, description in checkpoint_order:
+            if checkpoint_key not in checkpoint_paths:
+                logger.info(f"  ✗ Phase {phase_num} ({checkpoint_key}): Not in checkpoint_paths")
+                break
 
-            if self._validate_checkpoint(checkpoint_path, required_fields[phase_key]):
-                logger.info(f"  ✓ Phase {phase_num}: {checkpoint_path.name} - Valid")
+            checkpoint_path = checkpoint_paths[checkpoint_key]
+
+            if self._validate_checkpoint(checkpoint_path, required_fields[checkpoint_key]):
+                logger.info(f"  ✓ Phase {phase_num}: {checkpoint_path.name} - Valid ({description})")
                 last_valid_phase = phase_num
             else:
-                logger.info(f"  ✗ Phase {phase_num}: {checkpoint_path.name} - Not found")
+                logger.info(f"  ✗ Phase {phase_num}: {checkpoint_path.name} - Not found ({description})")
                 break
 
         resume_phase = last_valid_phase + 1
@@ -330,8 +357,8 @@ class AdversarialSmartPipeline:
 
         if last_valid_phase == 0:
             logger.info("→ No checkpoints found - Starting from Phase 1")
-        elif last_valid_phase == 9:
-            logger.info("→ All 9 phases complete!")
+        elif last_valid_phase == 8:
+            logger.info("→ All Pass 1-2B phases complete!")
         else:
             logger.info(f"→ Resuming from Phase {resume_phase}")
             logger.info(f"→ Loading Phases 1-{last_valid_phase} from checkpoints")
@@ -341,69 +368,49 @@ class AdversarialSmartPipeline:
         return resume_phase
 
     def _load_phase_checkpoints(self, up_to_phase: int):
-        """Load checkpoint data for phases 1 through up_to_phase (9-Phase Architecture)"""
+        """Load checkpoint data for phases 1 through up_to_phase (Pass 1-2B Architecture)"""
         checkpoint_paths = self._get_checkpoint_paths()
 
         if up_to_phase >= 1:
             phase1_data = self._load_checkpoint(checkpoint_paths["phase1"])
             self.audio_analysis = phase1_data
             self.scenes = phase1_data.get('scenes', [])
-            self.quality_map = {float(k): v for k, v in phase1_data.get('quality_scores', {}).items()}
-            logger.info(f"⚡ Loaded Phase 1: Audio + Scene + Quality")
+            logger.info(f"⚡ Loaded Phase 1: Audio + Scene Analysis")
 
         if up_to_phase >= 2:
             phase2_data = self._load_checkpoint(checkpoint_paths["phase2"])
             self.visual_samples = phase2_data.get('samples', [])
-            logger.info(f"⚡ Loaded Phase 2: Visual Samples ({len(self.visual_samples)} samples)")
+            logger.info(f"⚡ Loaded Phase 2: Visual Samples ({len(self.visual_samples)} samples @ 2fps)")
 
         if up_to_phase >= 3:
-            phase3_data = self._load_checkpoint(checkpoint_paths["phase3"])
-            self.highlights = phase3_data.get('highlights', [])
-            logger.info(f"⚡ Loaded Phase 3: Highlights ({len(self.highlights)} highlights)")
+            clip_data = self._load_checkpoint(checkpoint_paths["clip_analysis"])
+            self.clip_analysis = clip_data
+            logger.info(f"⚡ Loaded Phase 3: CLIP Analysis ({len(clip_data.get('spurious_candidates', []))} spurious)")
 
         if up_to_phase >= 4:
-            phase4_data = self._load_checkpoint(checkpoint_paths["phase4"])
-            self.frame_budget = phase4_data.get('recommended_frames', 47)
-            logger.info(f"⚡ Loaded Phase 4: Frame Budget ({self.frame_budget} frames)")
+            pass1_data = self._load_checkpoint(checkpoint_paths["pass1"])
+            self.pass1_results = pass1_data
+            logger.info(f"⚡ Loaded Phase 4: Pass 1 Filter ({pass1_data['selection_breakdown']['total']} frames)")
 
         if up_to_phase >= 5:
-            phase5_data = self._load_checkpoint(checkpoint_paths["phase5"])
-            self.frame_selection = phase5_data
-            logger.info(f"⚡ Loaded Phase 5: Frame Selection")
+            pass2a_data = self._load_checkpoint(checkpoint_paths["pass2a"])
+            self.pass2a_results = pass2a_data
+            logger.info(f"⚡ Loaded Phase 5: Pass 2A Sonnet ({len(pass2a_data.get('mode1_precise', []))} moments)")
 
         if up_to_phase >= 6:
-            frames_metadata = self._load_checkpoint(checkpoint_paths["phase6"])
-            # Reconstruct extracted_frames from metadata
-            from processing.smart_frame_extractor import ExtractedFrame
-            self.extracted_frames = []
-            for frame_data in frames_metadata.get("frames", []):
-                self.extracted_frames.append(ExtractedFrame(
-                    frame_id=frame_data["frame_id"],
-                    timestamp=frame_data["timestamp"],
-                    frame_type=frame_data["frame_type"],
-                    priority=frame_data.get("priority", "medium"),
-                    image_path=frame_data["image_path"],
-                    opportunity_type=frame_data.get("opportunity_type"),
-                    audio_cue=frame_data.get("audio_cue"),
-                    reason=frame_data.get("reason"),
-                    is_key_frame=frame_data.get("is_key_frame", False),
-                    cluster_id=frame_data.get("cluster_id"),
-                    cluster_position=frame_data.get("cluster_position")
-                ))
-            logger.info(f"⚡ Loaded Phase 6: Frames ({len(self.extracted_frames)} frames)")
+            pass2b_data = self._load_checkpoint(checkpoint_paths["pass2b"])
+            self.pass2b_results = pass2b_data
+            logger.info(f"⚡ Loaded Phase 6: Pass 2B Opus ({len(pass2b_data.get('mode3_inference_window', []))} moments)")
 
         if up_to_phase >= 7:
-            self.evidence = self._load_checkpoint(checkpoint_paths["phase7"])
-            logger.info(f"⚡ Loaded Phase 7: Evidence")
+            validation_data = self._load_checkpoint(checkpoint_paths["validation"])
+            self.validation_results = validation_data
+            logger.info(f"⚡ Loaded Phase 7: Validation ({len(validation_data.get('validated_moments', []))} validated)")
 
         if up_to_phase >= 8:
-            questions_data = self._load_checkpoint(checkpoint_paths["phase8"])
-            self.questions = questions_data.get("questions", [])
-            logger.info(f"⚡ Loaded Phase 8: Questions ({len(self.questions)} questions)")
-
-        if up_to_phase >= 9:
-            self.gemini_results = self._load_checkpoint(checkpoint_paths["phase9"])
-            logger.info(f"⚡ Loaded Phase 9: Gemini Results")
+            pass3_data = self._load_checkpoint(checkpoint_paths["pass3"])
+            self.pass3_results = pass3_data
+            logger.info(f"⚡ Loaded Phase 8: Pass 3 QA ({len(pass3_data.get('qa_pairs', []))} QA pairs)")
 
     def _compile_results(self, duration: float) -> Dict:
         """
@@ -422,30 +429,50 @@ class AdversarialSmartPipeline:
             "total_cost": self.total_cost,
             "phases_completed": [
                 "audio_analysis",
-                "opportunity_mining",
-                "frame_extraction",
-                "evidence_extraction",
-                "question_generation"
+                "visual_sampling_2fps",
+                "clip_analysis",
+                "pass1_smart_filter",
+                "pass2a_sonnet_selection",
+                "pass2b_opus_selection",
+                "moment_validation",
+                "pass3_qa_generation"
             ],
             "outputs": {
-                "audio_analysis": str(self.output_dir / f"{self.video_id}_audio_analysis.json"),
-                "opportunities": str(self.output_dir / f"{self.video_id}_opportunities.json"),
-                "frames_metadata": str(self.output_dir / "frames" / self.video_id / "frames_metadata.json"),
-                "evidence": str(self.output_dir / f"{self.video_id}_evidence.json"),
-                "questions": str(self.output_dir / f"{self.video_id}_questions.json")
+                "audio_analysis": str(self.output_dir / f"{self.video_id}_phase1_audio_scene_quality.json"),
+                "visual_samples": str(self.output_dir / f"{self.video_id}_phase2_visual_samples_2fps.json"),
+                "clip_analysis": str(self.output_dir / f"{self.video_id}_clip_analysis.json"),
+                "pass1_filtered": str(self.output_dir / f"{self.video_id}_pass1_filtered_frames.json"),
+                "pass2a_moments": str(self.output_dir / f"{self.video_id}_pass2a_sonnet_moments.json"),
+                "pass2b_moments": str(self.output_dir / f"{self.video_id}_pass2b_opus_moments.json"),
+                "validated_moments": str(self.output_dir / f"{self.video_id}_validated_moments.json"),
+                "qa_pairs": str(self.output_dir / f"{self.video_id}_pass3_qa_pairs.json")
             },
             "metrics": {
                 "audio_duration": self.audio_analysis.get("duration", 0) if self.audio_analysis else 0,
-                "opportunities_detected": {
-                    "total": self.opportunities.get("total_opportunities", 0) if self.opportunities else 0,
-                    "validated": self.opportunities.get("validated_opportunities", 0) if self.opportunities else 0,
-                    "stage1_candidates": self.opportunities.get("stage1_candidates", 0) if self.opportunities else 0,
-                    "stage2_validated": self.opportunities.get("stage2_validated", 0) if self.opportunities else 0,
-                    "premium_frames": len(self.opportunities.get("premium_frames", [])) if self.opportunities else 0,
-                    "by_type": self.opportunities.get("opportunity_statistics", {}) if self.opportunities else {}
-                },
-                "frames_extracted": len(self.extracted_frames),
-                "questions_generated": len(self.questions)
+                "frames_sampled_2fps": len(self.visual_samples) if hasattr(self, 'visual_samples') else 0,
+                "clip_spurious_candidates": len(self.clip_analysis.get('spurious_candidates', [])) if hasattr(self, 'clip_analysis') else 0,
+                "pass1_selected": len(self.pass1_results.get('selected_frames', [])) if hasattr(self, 'pass1_results') else 0,
+                "pass2a_moments": (
+                    len(self.pass2a_results.get('mode1_precise', [])) +
+                    len(self.pass2a_results.get('mode2_micro_temporal', [])) +
+                    len(self.pass2a_results.get('mode3_inference_window', [])) +
+                    len(self.pass2a_results.get('mode4_clusters', []))
+                ) if hasattr(self, 'pass2a_results') else 0,
+                "pass2b_moments": (
+                    len(self.pass2b_results.get('mode1_precise', [])) +
+                    len(self.pass2b_results.get('mode2_micro_temporal', [])) +
+                    len(self.pass2b_results.get('mode3_inference_window', [])) +
+                    len(self.pass2b_results.get('mode4_clusters', []))
+                ) if hasattr(self, 'pass2b_results') else 0,
+                "validated_moments": len(self.validation_results.get('validated_moments', [])) if hasattr(self, 'validation_results') else 0,
+                "qa_pairs_generated": len(self.questions),
+                "cost_breakdown": {
+                    "pass1": self.pass1_results.get('cost', 0) if hasattr(self, 'pass1_results') else 0,
+                    "pass2a": self.pass2a_results.get('cost', 0) if hasattr(self, 'pass2a_results') else 0,
+                    "pass2b": self.pass2b_results.get('cost', 0) if hasattr(self, 'pass2b_results') else 0,
+                    "pass3": self.pass3_results.get('cost', 0) if hasattr(self, 'pass3_results') else 0,
+                    "total": self.total_cost
+                }
             }
         }
 
@@ -503,54 +530,58 @@ class AdversarialSmartPipeline:
             else:
                 logger.info("\n🎵 PHASE 1: Audio + Scene + Quality Analysis [SKIPPED - loaded from checkpoint]")
 
-            # Phase 2: Quick Visual Sampling + FREE Models
+            # Phase 2: Quick Visual Sampling (2fps) + FREE Models
             if resume_from_phase <= 2:
-                logger.info("\n🖼️  PHASE 2: Quick Visual Sampling + FREE Models")
-                self._run_phase2_visual_sampling()
+                logger.info("\n🖼️  PHASE 2: Visual Sampling (2fps) + FREE Models")
+                self._run_phase2_visual_sampling_2fps()
             else:
-                logger.info("\n🖼️  PHASE 2: Quick Visual Sampling + FREE Models [SKIPPED - loaded from checkpoint]")
+                logger.info("\n🖼️  PHASE 2: Visual Sampling (2fps) + FREE Models [SKIPPED - loaded from checkpoint]")
 
-            # Phase 3: Multi-Signal Highlight Detection
+            # Content Moderation: Check video safety (after Phase 2)
+            logger.info("\n🛡️  CONTENT MODERATION: Checking video safety and quality")
+            self._run_content_moderation()
+
+            # CLIP Analysis: Generate embeddings and detect spurious candidates
             if resume_from_phase <= 3:
-                logger.info("\n🎯 PHASE 3: Multi-Signal Highlight Detection")
-                self._run_phase3_highlight_detection()
+                logger.info("\n🔗 CLIP ANALYSIS: Text-Image Alignment & Spurious Detection")
+                self._run_clip_analysis()
             else:
-                logger.info("\n🎯 PHASE 3: Multi-Signal Highlight Detection [SKIPPED - loaded from checkpoint]")
+                logger.info("\n🔗 CLIP ANALYSIS [SKIPPED - loaded from checkpoint]")
 
-            # Phase 4: Dynamic Frame Budget Calculation
+            # Pass 1: Smart Pre-Filter (3-Tier Selection)
             if resume_from_phase <= 4:
-                logger.info("\n💰 PHASE 4: Dynamic Frame Budget Calculation")
-                self._run_phase4_frame_budget()
+                logger.info("\n🎯 PASS 1: Smart Pre-Filter (Rule-Based + Sonnet 3.5)")
+                self._run_pass1_filter()
             else:
-                logger.info("\n💰 PHASE 4: Dynamic Frame Budget Calculation [SKIPPED - loaded from checkpoint]")
+                logger.info("\n🎯 PASS 1: Smart Pre-Filter [SKIPPED - loaded from checkpoint]")
 
-            # Phase 5: Intelligent Frame Selection (LLM with Visual Context)
+            # Pass 2A: Sonnet 4.5 Ontology Selection (9 Easy Types)
             if resume_from_phase <= 5:
-                logger.info("\n🧠 PHASE 5: Intelligent Frame Selection (Claude + Visual Context)")
-                self._run_phase5_frame_selection()
+                logger.info("\n🧠 PASS 2A: Sonnet 4.5 Easy/Medium Ontology Selection")
+                self._run_pass2a_selection()
             else:
-                logger.info("\n🧠 PHASE 5: Intelligent Frame Selection [SKIPPED - loaded from checkpoint]")
+                logger.info("\n🧠 PASS 2A: Sonnet 4.5 Selection [SKIPPED - loaded from checkpoint]")
 
-            # Phase 6: Targeted Frame Extraction
+            # Pass 2B: Opus 4 Hard Ontology Selection (4 Hard Types + Spurious)
             if resume_from_phase <= 6:
-                logger.info("\n📸 PHASE 6: Targeted Frame Extraction")
-                self._run_phase6_frame_extraction()
+                logger.info("\n🔮 PASS 2B: Opus 4 Hard Ontology + Spurious Detection")
+                self._run_pass2b_selection()
             else:
-                logger.info("\n📸 PHASE 6: Targeted Frame Extraction [SKIPPED - loaded from checkpoint]")
+                logger.info("\n🔮 PASS 2B: Opus 4 Selection [SKIPPED - loaded from checkpoint]")
 
-            # Phase 7: Full Evidence Extraction
+            # Validation Layer: Quality Gate for All Moments
             if resume_from_phase <= 7:
-                logger.info("\n🔍 PHASE 7: Full Evidence Extraction")
-                self._run_phase7_evidence_extraction()
+                logger.info("\n✅ VALIDATION: Quality Gate for All Moments")
+                self._run_validation()
             else:
-                logger.info("\n🔍 PHASE 7: Full Evidence Extraction [SKIPPED - loaded from checkpoint]")
+                logger.info("\n✅ VALIDATION [SKIPPED - loaded from checkpoint]")
 
-            # Phase 8: Question Generation + Validation
+            # Pass 3: Batched QA Generation (Sonnet 4.5)
             if resume_from_phase <= 8:
-                logger.info("\n❓ PHASE 8: Question Generation + Validation")
-                self._run_phase8_question_generation()
+                logger.info("\n❓ PASS 3: Batched QA Generation (Sonnet 4.5)")
+                self._run_pass3_qa_generation()
             else:
-                logger.info("\n❓ PHASE 8: Question Generation + Validation [SKIPPED - loaded from checkpoint]")
+                logger.info("\n❓ PASS 3: QA Generation [SKIPPED - loaded from checkpoint]")
 
             # Phase 9: Gemini Testing (optional)
             if self.gemini_api_key and resume_from_phase <= 9:
@@ -589,6 +620,7 @@ class AdversarialSmartPipeline:
                 'duration': whisper_data['duration'],
                 'segments': whisper_data['segments'],
                 'transcript': whisper_data.get('transcript', {}),
+                'audio_events': whisper_data.get('audio_events', []),  # Load audio events
                 'language': whisper_data.get('language', 'en')
             }
             logger.info(f"      ✓ Loaded from checkpoint (skipped Whisper)")
@@ -613,6 +645,7 @@ class AdversarialSmartPipeline:
                     'segments': self.audio_analysis['segments']
                 }),
                 "segments": self.audio_analysis['segments'],
+                "audio_events": self.audio_analysis.get('audio_events', []),  # Include audio events
                 "language": self.audio_analysis.get('language', 'en')
             }
             with open(whisper_checkpoint_path, 'w') as f:
@@ -669,11 +702,12 @@ class AdversarialSmartPipeline:
         phase_start = datetime.now()
         logger.info("📍 Starting Phase 2: Quick Visual Sampling + FREE Models")
         logger.info(f"   Sampling 1 frame per scene (~{len(self.scenes)} frames)")
-        logger.info(f"   Running: BLIP-2, CLIP, Places365, YOLO, OCR, Pose, FER")
+        logger.info(f"   Running: CLIP, Places365, YOLO, OCR, Pose, FER (BLIP-2 disabled for speed)")
 
         # Run quick visual sampler with FREE models
+        # BLIP-2 disabled by default (saves 2+ hours). Set enable_blip2=True to enable.
         # Optional: Set min_quality=0.3 to skip low-quality scenes
-        sampler = QuickVisualSampler()
+        sampler = QuickVisualSampler(enable_blip2=False)
         sample_result = sampler.sample_and_analyze(
             video_path=str(self.video_path),
             scenes=self.scenes,
@@ -699,6 +733,61 @@ class AdversarialSmartPipeline:
         logger.info(f"✅ Phase 2 Complete! ({phase_time:.1f}s)")
         logger.info(f"   Cost: $0.00 (all FREE models)")
         logger.info(f"   Saved to: {checkpoint_path.name}")
+
+    def _run_content_moderation(self):
+        """
+        Content Moderation: Check video safety and quality.
+
+        Implements guideline requirements:
+        1. Reject videos with violence/weapons
+        2. Reject videos with NSFW content
+        3. Reject videos with burned-in subtitles
+
+        Raises:
+            ValueError: If video fails content moderation
+        """
+        logger.info("📍 Starting Content Moderation")
+
+        # Use Phase 2 visual samples from Pass 1-2B architecture
+        if not self.visual_samples:
+            logger.warning("⚠️  No visual samples available - skipping content moderation")
+            return
+
+        # Get frame paths for subtitle detection
+        sample_frame_paths = []
+        for sample in self.visual_samples:
+            frame_path = sample.get('frame_path')
+            if frame_path and Path(frame_path).exists():
+                sample_frame_paths.append(Path(frame_path))
+
+        logger.info(f"   Checking {len(sample_frame_paths)} frames")
+
+        # Get YOLO detections for violence check
+        yolo_detections = {}
+        for sample in self.visual_samples:
+            frame_id = sample.get('frame_id')
+            objects = sample.get('objects', [])
+            if objects:
+                yolo_detections[frame_id] = {
+                    'detected_objects': [obj.get('label', obj.get('class', '')) for obj in objects]
+                }
+
+        # Run content moderation
+        moderator = ContentModerator()
+        should_reject, reason = moderator.should_reject_video(
+            video_path=self.video_path,
+            sample_frames=sample_frame_paths,
+            yolo_detections=yolo_detections,
+            clip_embeddings=None  # CLIP embeddings available in self.clip_analysis if needed
+        )
+
+        if should_reject:
+            logger.error(f"❌ VIDEO REJECTED: {reason}")
+            logger.error(f"   Guideline violation detected")
+            raise ValueError(f"Content moderation failed: {reason}")
+
+        logger.info(f"✅ Content Moderation Passed!")
+        logger.info(f"   {reason}")
 
     def _run_phase3_highlight_detection(self):
         """Phase 3: Multi-Signal Highlight Detection"""
@@ -832,9 +921,27 @@ class AdversarialSmartPipeline:
             min_score=0.3
         )
 
+        # ✅ Filter out intro/outro highlights (guideline requirement)
+        video_duration = self.audio_analysis['duration']
+        filtered_highlights = []
+        intro_outro_count = 0
+
+        for highlight in top_highlights:
+            timestamp = highlight.get('timestamp', 0)
+            if is_intro_outro(timestamp, video_duration):
+                intro_outro_count += 1
+                logger.debug(f"   Filtered intro/outro highlight at {timestamp:.1f}s")
+            else:
+                filtered_highlights.append(highlight)
+
+        if intro_outro_count > 0:
+            logger.info(f"   Filtered {intro_outro_count} intro/outro highlights")
+
+        logger.info(f"   Using {len(filtered_highlights)}/{len(top_highlights)} highlights (after intro/outro filter)")
+
         selection_result = frame_selector.select_frames(
             visual_samples=self.visual_samples,
-            highlights=top_highlights,
+            highlights=filtered_highlights,  # ✅ Use filtered highlights (no intro/outro)
             quality_map=self.quality_map,
             frame_budget=self.frame_budget,
             video_duration=self.audio_analysis['duration']
@@ -847,6 +954,20 @@ class AdversarialSmartPipeline:
         if selection_result['coverage']['missing_types']:
             logger.warning(f"   Missing types: {', '.join(selection_result['coverage']['missing_types'][:3])}")
 
+        # Extract cost information
+        cost_summary = selection_result.get('cost_summary', {})
+        claude_cost = cost_summary.get('claude_api_call', {})
+        input_tokens = claude_cost.get('input_tokens', 0)
+        output_tokens = claude_cost.get('output_tokens', 0)
+        total_tokens = claude_cost.get('total_tokens', 0)
+        total_cost = claude_cost.get('total_cost', 0.05)  # Fallback to 0.05 if missing
+
+        logger.info(f"\n💰 Phase 5 Cost Summary:")
+        logger.info(f"   Input tokens:  {input_tokens:,}")
+        logger.info(f"   Output tokens: {output_tokens:,}")
+        logger.info(f"   Total tokens:  {total_tokens:,}")
+        logger.info(f"   Total cost:    ${total_cost:.4f}")
+
         # Save checkpoint
         checkpoint_path = self.output_dir / f"{self.video_id}_phase5_frame_selection.json"
         with open(checkpoint_path, 'w') as f:
@@ -854,10 +975,9 @@ class AdversarialSmartPipeline:
 
         phase_time = (datetime.now() - phase_start).total_seconds()
         logger.info(f"✅ Phase 5 Complete! ({phase_time:.1f}s)")
-        logger.info(f"   Cost: ~$0.05 (Claude frame selection)")
         logger.info(f"   Saved to: {checkpoint_path.name}")
 
-        self.total_cost += 0.05
+        self.total_cost += total_cost
 
     def _run_phase6_frame_extraction(self):
         """Phase 6: Targeted Frame Extraction"""
@@ -1079,42 +1199,83 @@ class AdversarialSmartPipeline:
         return similarity > 0.3  # Consensus if >30% word overlap
 
     def _run_phase8_question_generation(self):
-        """Phase 8: Question Generation + Validation"""
+        """Phase 8: Optimized Direct Vision Question Generation (Skip Phase 7)"""
         phase_start = datetime.now()
-        logger.info("📍 Starting Phase 8: Question Generation + Validation")
-        logger.info("   Using Claude Sonnet 4.5 + Enhanced Validation...")
+        logger.info("📍 Starting Phase 8: Direct Vision Question Generation")
+        logger.info("   Using GPT-4o Vision (30% cheaper than Claude, excellent quality)...")
 
-        # Generate questions using enhanced generator
-        generator = MultimodalQuestionGeneratorV2(
+        # Initialize Phase 8 Vision Generator
+        generator = Phase8VisionGenerator(
             openai_api_key=self.openai_api_key,
-            claude_api_key=self.claude_api_key
+            anthropic_api_key=self.claude_api_key  # For hedging fixer
         )
 
+        # Pass FULL Phase 5 output (includes Claude-validated clusters!)
+        frames_dir = self.output_dir / "frames" / self.video_id
+
+        # Generate questions using Phase 5's validated clusters
         result = generator.generate_questions(
-            phase4_evidence=self.evidence,
+            phase5_output=self.frame_selection,  # ✅ FIXED: Pass full output with clusters
             audio_analysis=self.audio_analysis,
+            frames_dir=frames_dir,
             video_id=self.video_id,
-            target_gpt4v=3,
-            target_claude=7,
-            target_template=40,
-            keep_best_template=20
+            highlights=self.highlights  # ✅ Pass Phase 3 highlights for adaptive threshold
         )
 
-        self.questions = result.questions
-        self.question_generation_result = result
+        # Store questions (convert GeneratedQuestion objects to dicts)
+        self.questions = [{
+            'question_id': q.question_id,
+            'question': q.question,
+            'golden_answer': q.answer,
+            'question_type': q.question_type,
+            # ✅ FIX #1: Use actual start/end timestamps for cluster questions
+            # For cluster questions: use q.start_timestamp and q.end_timestamp
+            # For single-frame questions: use q.timestamp ± window
+            # IMPORTANT: Clamp to 0 to prevent negative timestamps
+            'start_timestamp': self._format_timestamp(
+                max(0, q.start_timestamp) if q.start_timestamp is not None else max(0, q.timestamp - 1)
+            ),
+            'end_timestamp': self._format_timestamp(
+                max(0, q.end_timestamp) if q.end_timestamp is not None else max(0, q.timestamp + 2)
+            ),
+            'audio_cue': q.audio_cue,
+            'visual_cue': q.visual_cue,
+            'confidence': q.confidence,
+            'model': q.model,
+            'tokens': q.tokens,
+            'cost': q.cost
+        } for q in result['questions']]
 
-        # Save questions
+        # Save questions in standard format
         questions_path = self.output_dir / f"{self.video_id}_phase8_questions.json"
-        generator.save_questions(result, questions_path)
+        output_data = {
+            "video_id": self.video_id,
+            "total_questions": len(self.questions),
+            "questions": self.questions,
+            "cost_summary": result['cost_summary'],
+            "metadata": result['metadata']
+        }
+
+        with open(questions_path, 'w', encoding='utf-8') as f:
+            json.dump(output_data, f, indent=2, ensure_ascii=False)
+
+        # Update total cost
+        phase_cost = result['cost_summary']['total_cost']
+        self.total_cost += phase_cost
 
         phase_time = (datetime.now() - phase_start).total_seconds()
         logger.info(f"✅ Phase 8 Complete! ({phase_time:.1f}s)")
-        logger.info(f"   Total questions: {result.total_questions}")
-        logger.info(f"   Validated: {result.validated_questions}")
-        logger.info(f"   Generation cost: ${result.generation_cost:.4f}")
+        logger.info(f"   Total questions: {len(self.questions)}")
+        logger.info(f"   Generation cost: ${phase_cost:.4f}")
+        logger.info(f"   Frames processed: {result['metadata']['frames_processed']}")
+        logger.info(f"   Model used: {result['metadata']['model_used']}")
         logger.info(f"   Saved to: {questions_path.name}")
 
-        self.total_cost += result.generation_cost
+    def _format_timestamp(self, seconds: float) -> str:
+        """Format seconds to MM:SS"""
+        minutes = int(seconds // 60)
+        secs = int(seconds % 60)
+        return f"{minutes:02d}:{secs:02d}"
 
     def _run_phase9_gemini_testing(self):
         """Phase 9: Gemini Testing (Optional)"""
@@ -1139,6 +1300,424 @@ class AdversarialSmartPipeline:
         phase_time = (datetime.now() - phase_start).total_seconds()
         logger.info(f"✅ Phase 9 Complete! ({phase_time:.1f}s)")
         logger.info(f"   Saved to: {gemini_path.name}")
+
+    # ==================== NEW PASS 1-2B ARCHITECTURE METHODS ====================
+
+    def _run_phase2_visual_sampling_2fps(self):
+        """Phase 2: Visual Sampling at 2fps + FREE Models"""
+        phase_start = datetime.now()
+        logger.info("📍 Starting Phase 2: Visual Sampling (2fps) + FREE Models")
+
+        sampler = QuickVisualSampler(enable_blip2=False)
+
+        # Create frames output directory
+        frames_dir = self.output_dir / "frames" / self.video_id
+        frames_dir.mkdir(parents=True, exist_ok=True)
+
+        # FPS mode: 2 frames per second for uniform sampling
+        result = sampler.sample_and_analyze(
+            video_path=str(self.video_path),
+            scenes=self.scenes,
+            mode="fps",  # FPS mode: uniform 2fps sampling
+            fps_rate=2.0,  # 2 frames per second
+            frames_output_dir=str(frames_dir)  # Save frames to disk
+        )
+
+        self.visual_samples = result['samples']
+
+        # Save results (mode-agnostic filename for checkpoint compatibility)
+        phase2_path = self.output_dir / f"{self.video_id}_phase2_visual_samples.json"
+        with open(phase2_path, 'w') as f:
+            json.dump(convert_numpy_types(result), f, indent=2)
+
+        phase_time = (datetime.now() - phase_start).total_seconds()
+        logger.info(f"✅ Phase 2 Complete! ({phase_time:.1f}s, ~{len(self.visual_samples)} frames)")
+        logger.info(f"   Saved to: {phase2_path.name}")
+
+    def _run_clip_analysis(self):
+        """CLIP Analysis: Text-Image Alignment & Spurious Detection"""
+        phase_start = datetime.now()
+        logger.info("📍 Starting CLIP Analysis")
+
+        # Prepare transcript segments
+        transcript_segments = self.audio_analysis.get('segments', [])
+
+        # Run CLIP analysis
+        clip_path = self.output_dir / f"{self.video_id}_clip_analysis.json"
+
+        self.clip_analysis = run_clip_analysis(
+            video_path=str(self.video_path),
+            frames_metadata=self.visual_samples,
+            transcript_segments=transcript_segments,
+            output_path=str(clip_path),
+            use_siglip=True  # Use SigLIP for better alignment
+        )
+
+        phase_time = (datetime.now() - phase_start).total_seconds()
+        logger.info(f"✅ CLIP Analysis Complete! ({phase_time:.1f}s)")
+        logger.info(f"   Spurious candidates: {len(self.clip_analysis['spurious_candidates'])}")
+        logger.info(f"   Visual anomalies: {len(self.clip_analysis['visual_anomalies'])}")
+
+    def _run_pass1_filter(self):
+        """Pass 1: Smart Pre-Filter (3-Tier Selection)"""
+        phase_start = datetime.now()
+        logger.info("📍 Starting Pass 1: Smart Pre-Filter")
+
+        pass1_path = self.output_dir / f"{self.video_id}_pass1_filtered_frames.json"
+
+        self.pass1_results = run_pass1_filter(
+            frames=self.visual_samples,
+            audio_analysis=self.audio_analysis,
+            clip_analysis=self.clip_analysis,
+            scenes=self.scenes,
+            video_duration=self.audio_analysis.get('duration', 0),
+            output_path=str(pass1_path)
+        )
+
+        # Track cost
+        pass1_cost = self.pass1_results.get('cost', 0.35)
+        self.total_cost += pass1_cost
+
+        phase_time = (datetime.now() - phase_start).total_seconds()
+        selected_count = len(self.pass1_results['selected_frames'])
+        logger.info(f"✅ Pass 1 Complete! ({phase_time:.1f}s, ${pass1_cost:.4f})")
+        logger.info(f"   Selected: {selected_count} frames from {len(self.visual_samples)}")
+
+    def _run_pass2a_selection(self):
+        """Pass 2A: Sonnet 4.5 Easy/Medium Ontology Selection"""
+        phase_start = datetime.now()
+        logger.info("📍 Starting Pass 2A: Sonnet 4.5 Ontology Selection")
+
+        frames_dir = self.output_dir / "frames" / self.video_id
+        frames_dir.mkdir(parents=True, exist_ok=True)
+
+        pass2a_path = self.output_dir / f"{self.video_id}_pass2a_sonnet_moments.json"
+
+        self.pass2a_results = run_pass2a_selection(
+            selected_frames=self.pass1_results['selected_frames'],
+            audio_analysis=self.audio_analysis,
+            clip_analysis=self.clip_analysis,
+            frames_dir=str(frames_dir),
+            output_path=str(pass2a_path)
+        )
+
+        # Track cost
+        pass2a_cost = self.pass2a_results.get('cost', 1.10)
+        self.total_cost += pass2a_cost
+
+        phase_time = (datetime.now() - phase_start).total_seconds()
+        total_moments = sum([
+            len(self.pass2a_results.get('mode1_precise', [])),
+            len(self.pass2a_results.get('mode2_micro_temporal', [])),
+            len(self.pass2a_results.get('mode3_inference_window', [])),
+            len(self.pass2a_results.get('mode4_clusters', []))
+        ])
+        logger.info(f"✅ Pass 2A Complete! ({phase_time:.1f}s, ${pass2a_cost:.4f})")
+        logger.info(f"   Moments detected: {total_moments}")
+        logger.info(f"   Flagged for Opus 4: {len(self.pass2a_results.get('flagged_for_opus4', []))}")
+
+    def _run_pass2b_selection(self):
+        """Pass 2B: Opus 4 Hard Ontology + Spurious Detection"""
+        phase_start = datetime.now()
+        logger.info("📍 Starting Pass 2B: Opus 4 Hard Types + Spurious")
+
+        frames_dir = self.output_dir / "frames" / self.video_id
+
+        pass2b_path = self.output_dir / f"{self.video_id}_pass2b_opus_moments.json"
+
+        self.pass2b_results = run_pass2b_selection(
+            flagged_frames=self.pass2a_results.get('flagged_for_opus4', []),
+            spurious_candidates=self.clip_analysis.get('spurious_candidates', []),
+            audio_analysis=self.audio_analysis,
+            frames_dir=str(frames_dir),
+            all_frames_metadata=self.visual_samples,
+            full_video_context={'scenes': self.scenes},
+            output_path=str(pass2b_path)
+        )
+
+        # Track cost
+        pass2b_cost = self.pass2b_results.get('cost', 1.00)
+        self.total_cost += pass2b_cost
+
+        phase_time = (datetime.now() - phase_start).total_seconds()
+        total_moments = sum([
+            len(self.pass2b_results.get('mode1_precise', [])),
+            len(self.pass2b_results.get('mode2_micro_temporal', [])),
+            len(self.pass2b_results.get('mode3_inference_window', [])),
+            len(self.pass2b_results.get('mode4_clusters', []))
+        ])
+        logger.info(f"✅ Pass 2B Complete! ({phase_time:.1f}s, ${pass2b_cost:.4f})")
+        logger.info(f"   Hard moments detected: {total_moments}")
+
+    def _run_validation(self):
+        """Validation Layer: Quality Gate for All Moments"""
+        phase_start = datetime.now()
+        logger.info("📍 Starting Validation Layer")
+
+        # Get all available frame IDs
+        available_frames = set(f['frame_id'] for f in self.visual_samples)
+
+        validation_path = self.output_dir / f"{self.video_id}_validated_moments.json"
+
+        self.validation_results = run_validation(
+            pass2a_results=self.pass2a_results,
+            pass2b_results=self.pass2b_results,
+            available_frames=available_frames,
+            audio_analysis=self.audio_analysis,
+            video_duration=self.audio_analysis.get('duration', 0),
+            output_path=str(validation_path)
+        )
+
+        phase_time = (datetime.now() - phase_start).total_seconds()
+        validated = self.validation_results['validation_summary']['validated']
+        rejected = self.validation_results['validation_summary']['rejected']
+        logger.info(f"✅ Validation Complete! ({phase_time:.1f}s)")
+        logger.info(f"   Validated: {validated} moments")
+        logger.info(f"   Rejected: {rejected} moments")
+        logger.info(f"   Coverage: {self.validation_results['coverage_check']['meets_requirements']}")
+
+    def _convert_moments_to_phase5_format(self, validated_moments: List[Dict]) -> Dict:
+        """
+        Convert Pass 2A/2B validated moments to Phase 5 output format for Phase 8.
+
+        Phase 8 expects:
+        {
+            'selection_plan': [frames with timestamp, priority, question_types],
+            'dense_clusters': [cluster metadata],
+            'coverage': {...}
+        }
+
+        Args:
+            validated_moments: List of validated moments from Pass 2A/2B
+
+        Returns:
+            Phase 5-compatible format dict
+        """
+        single_frames = []
+        dense_clusters = []
+
+        for moment in validated_moments:
+            mode = moment.get('mode', 'precise')
+            frame_ids = moment.get('frame_ids', [])
+            timestamps = moment.get('timestamps', [])
+
+            # Normalize type names to official PDF names
+            primary_type = normalize_type(moment.get('primary_ontology', ''))
+            secondary_types = [normalize_type(t) for t in moment.get('secondary_ontologies', [])]
+            question_types = [primary_type] + secondary_types
+
+            if mode == 'cluster' or len(frame_ids) >= 3:
+                # Treat as cluster
+                dense_clusters.append({
+                    'start': min(timestamps) if timestamps else 0,
+                    'end': max(timestamps) if timestamps else 0,
+                    'frame_count': len(frame_ids),
+                    'reason': moment.get('correspondence', ''),
+                    'question_types': question_types,
+                    'visual_cues': moment.get('visual_cues', []),
+                    'audio_cues': moment.get('audio_cues', []),
+                    'validation': {
+                        'same_scene_type': True,
+                        'same_location': True,
+                        'continuous_action': True,
+                        'is_scene_cut': False
+                    }
+                })
+            else:
+                # Treat as single frame(s)
+                for i, ts in enumerate(timestamps):
+                    frame_id = frame_ids[i] if i < len(frame_ids) else f"moment_{ts:.1f}s"
+                    single_frames.append({
+                        'frame_id': frame_id,
+                        'timestamp': ts,
+                        'priority': moment.get('priority', 0.8),
+                        'question_types': question_types,
+                        'reason': moment.get('correspondence', ''),
+                        'visual_cues': moment.get('visual_cues', []),
+                        'audio_cues': moment.get('audio_cues', [])
+                    })
+
+        # Build coverage stats
+        all_types = set()
+        for frame in single_frames:
+            all_types.update(frame['question_types'])
+        for cluster in dense_clusters:
+            all_types.update(cluster['question_types'])
+
+        logger.info(f"Converted {len(validated_moments)} moments → {len(single_frames)} frames + {len(dense_clusters)} clusters")
+        logger.info(f"Coverage: {len(all_types)}/13 types")
+
+        return {
+            'selection_plan': single_frames,
+            'dense_clusters': dense_clusters,
+            'coverage': {
+                'covered_types': len(all_types),
+                'total_types': 13,
+                'missing_types': list(set(OFFICIAL_TYPES) - all_types),
+                'coverage_ratio': len(all_types) / 13
+            }
+        }
+
+    def _extract_cluster_frames(self, dense_clusters: List[Dict]) -> None:
+        """
+        Extract frames for clusters identified by Pass 2B.
+
+        Creates frames_metadata.json that Phase 8 expects.
+
+        Args:
+            dense_clusters: Cluster metadata from _convert_moments_to_phase5_format
+        """
+        if not dense_clusters:
+            logger.info("No clusters to extract frames for")
+            return
+
+        frames_dir = self.output_dir / "frames" / self.video_id
+        frames_dir.mkdir(parents=True, exist_ok=True)
+
+        logger.info(f"Extracting frames for {len(dense_clusters)} clusters...")
+
+        all_frames_metadata = []
+
+        for cluster_idx, cluster in enumerate(dense_clusters):
+            start_ts = cluster['start']
+            end_ts = cluster['end']
+            frame_count = cluster['frame_count']
+
+            # Generate evenly spaced timestamps
+            if frame_count == 1:
+                timestamps = [start_ts]
+            else:
+                timestamps = [
+                    start_ts + (end_ts - start_ts) * i / (frame_count - 1)
+                    for i in range(frame_count)
+                ]
+
+            logger.info(f"  Cluster {cluster_idx}: {len(timestamps)} frames at {start_ts:.1f}s-{end_ts:.1f}s")
+
+            # Extract frames using SmartFrameExtractor
+            for ts in timestamps:
+                frame_id = int(ts * 24)  # Assume 24 FPS
+                frame_path = frames_dir / f"frame_{frame_id:06d}.jpg"
+
+                # Skip if frame already exists
+                if frame_path.exists():
+                    logger.debug(f"    Frame already exists: {frame_path.name}")
+                else:
+                    # Extract frame from video
+                    import cv2
+                    video_path = self.output_dir / f"{self.video_id}_video.mp4"
+
+                    if not video_path.exists():
+                        logger.warning(f"    Video file not found: {video_path}")
+                        continue
+
+                    cap = cv2.VideoCapture(str(video_path))
+                    cap.set(cv2.CAP_PROP_POS_MSEC, ts * 1000)
+                    ret, frame = cap.read()
+
+                    if ret:
+                        cv2.imwrite(str(frame_path), frame)
+                        logger.debug(f"    Extracted: {frame_path.name}")
+                    else:
+                        logger.warning(f"    Failed to extract frame at {ts:.1f}s")
+
+                    cap.release()
+
+                # Add to metadata
+                all_frames_metadata.append({
+                    'frame_id': frame_id,
+                    'timestamp': ts,
+                    'image_path': str(frame_path),
+                    'frame_type': 'cluster',
+                    'cluster_id': f"cluster_{cluster_idx:02d}"
+                })
+
+        # Save frames_metadata.json
+        metadata_path = frames_dir / "frames_metadata.json"
+        with open(metadata_path, 'w') as f:
+            json.dump({
+                'frames': all_frames_metadata,
+                'total_frames': len(all_frames_metadata),
+                'extraction_method': 'cluster_extraction_pass3'
+            }, f, indent=2)
+
+        logger.info(f"✅ Extracted {len(all_frames_metadata)} cluster frames")
+        logger.info(f"   Saved metadata to: {metadata_path}")
+
+    def _run_pass3_qa_generation(self):
+        """Pass 3: Use Phase 8 Vision Generator for QA (Replaces old Pass 3)"""
+        phase_start = datetime.now()
+        logger.info("📍 Starting Pass 3: Phase 8 Vision QA Generation")
+        logger.info("   Using GPT-4o Vision with full guideline compliance...")
+
+        # Convert validated moments to Phase 5-like format for Phase 8
+        phase5_compatible = self._convert_moments_to_phase5_format(
+            self.validation_results['validated_moments']
+        )
+
+        # ✅ FIX: Extract cluster frames before QA generation
+        dense_clusters = phase5_compatible.get('dense_clusters', [])
+        if dense_clusters:
+            logger.info(f"Extracting frames for {len(dense_clusters)} clusters...")
+            self._extract_cluster_frames(dense_clusters)
+
+        frames_dir = self.output_dir / "frames" / self.video_id
+
+        # Use Phase 8 generator
+        generator = Phase8VisionGenerator(
+            openai_api_key=self.openai_api_key,
+            anthropic_api_key=self.claude_api_key
+        )
+
+        result = generator.generate_questions(
+            phase5_output=phase5_compatible,
+            audio_analysis=self.audio_analysis,
+            frames_dir=frames_dir,
+            video_id=self.video_id,
+            highlights=getattr(self, 'highlights', None)
+        )
+
+        # Convert Phase 8 questions to expected format
+        self.questions = []
+        for q in result['questions']:
+            self.questions.append({
+                'question_id': q.question_id,
+                'question': q.question,
+                'golden_answer': q.answer,
+                'question_type': q.question_type,
+                'sub_task_type': q.sub_task_type,
+                'start_timestamp': self._format_timestamp(max(0, q.start_timestamp) if q.start_timestamp else max(0, q.timestamp - 5)),
+                'end_timestamp': self._format_timestamp(max(0, q.end_timestamp) if q.end_timestamp else max(0, q.timestamp + 10)),
+                'audio_cue': q.audio_cue,
+                'visual_cue': q.visual_cue,
+                'confidence': q.confidence,
+                'model': q.model,
+                'cost': q.cost
+            })
+
+        # Save results
+        pass3_path = self.output_dir / f"{self.video_id}_pass3_qa_pairs.json"
+        output_data = {
+            "video_id": self.video_id,
+            "total_questions": len(self.questions),
+            "questions": self.questions,
+            "cost_summary": result['cost_summary'],
+            "metadata": result['metadata']
+        }
+
+        with open(pass3_path, 'w', encoding='utf-8') as f:
+            json.dump(convert_numpy_types(output_data), f, indent=2, ensure_ascii=False)
+
+        # Track cost
+        pass3_cost = result['cost_summary']['total_cost']
+        self.total_cost += pass3_cost
+
+        phase_time = (datetime.now() - phase_start).total_seconds()
+        logger.info(f"✅ Pass 3 Complete! ({phase_time:.1f}s, ${pass3_cost:.4f})")
+        logger.info(f"   QA pairs generated: {len(self.questions)}")
+        logger.info(f"   Quality fixes applied: {result['metadata'].get('quality_fixes_applied', 0)}")
+        logger.info(f"   Duplicates removed: {result['metadata'].get('duplicates_removed', 0)}")
+        logger.info(f"   Audio validation rejects: {result['metadata'].get('audio_validation_rejects', 0)}")
 
 # Test function
 def test_adversarial_pipeline(video_path: str):

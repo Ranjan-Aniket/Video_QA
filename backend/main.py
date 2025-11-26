@@ -13,6 +13,7 @@ from datetime import datetime
 # Import routers for Smart Pipeline
 from backend.api.endpoints import video_upload
 from backend.api.endpoints.smart_pipeline_router import router as smart_pipeline_router
+from backend.api.endpoints.analytics import router as analytics_router
 
 # Database initialization
 import sys
@@ -124,6 +125,13 @@ app.include_router(
 app.include_router(
     smart_pipeline_router,
     tags=["Smart Pipeline"]
+)
+
+# Analytics Router (for analytics page)
+app.include_router(
+    analytics_router,
+    prefix="/api/analytics",
+    tags=["Analytics"]
 )
 
 # ============================================================================

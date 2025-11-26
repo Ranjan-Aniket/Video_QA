@@ -7,6 +7,7 @@ Uses Claude Sonnet 4.5 with FULL VISUAL CONTEXT to select frames:
 3. Quality map from quality_mapper
 4. Dynamic frame budget
 5. Coverage of all 13 question types
+6. ✅ NEW: Spatial coverage guarantee (6 segments, min 3 frames each)
 
 KEY: Claude sees visual context BEFORE selecting frames
 """
@@ -82,10 +83,28 @@ class LLMFrameSelector:
                         'start': float,
                         'end': float,
                         'frame_count': int,
-                        'reason': str
+                        'reason': str,
+                        'scene_types': [str],
+                        'scene_type_consistent': bool,
+                        'validation': {
+                            'same_scene_type': bool,
+                            'same_location': bool,
+                            'continuous_action': bool,
+                            'is_scene_cut': bool
+                        }
                     }
                 ],
-                'coverage': dict
+                'coverage': dict,
+                'cost_summary': {
+                    'claude_api_call': {
+                        'input_tokens': int,
+                        'output_tokens': int,
+                        'total_tokens': int,
+                        'input_cost': float,
+                        'output_cost': float,
+                        'total_cost': float
+                    }
+                }
             }
         """
         logger.info(f"Selecting {frame_budget} frames with Claude + visual context...")
@@ -109,21 +128,256 @@ class LLMFrameSelector:
             highlights
         )
 
-        # Extract dense clusters and single frames
+        # Multi-layer cluster validation
         dense_clusters = selection_plan.get('dense_clusters', [])
+        validated_clusters = []
+
+        logger.info(f"Validating {len(dense_clusters)} clusters from Claude...")
+
+        for i, cluster in enumerate(dense_clusters, 1):
+            start = cluster['start']
+            end = cluster['end']
+
+            # Layer 4: Python coherence validation (structured fields)
+            is_valid_coherence, coherence_reason = self._validate_cluster_coherence(
+                cluster,
+                visual_samples
+            )
+
+            if not is_valid_coherence:
+                logger.warning(f"  ✗ Cluster {i}: {start:.1f}s-{end:.1f}s REJECTED (Coherence)")
+                logger.warning(f"    Reason: {coherence_reason}")
+                logger.warning(f"    Scene types: {cluster.get('scene_types', [])}")
+                continue  # Skip this cluster
+
+            # Passed coherence validation!
+            validated_clusters.append(cluster)
+            logger.info(f"  ✓ Cluster {i}: {start:.1f}s-{end:.1f}s VALID (Coherence check)")
+
+        logger.info(f"Cluster validation: {len(dense_clusters)} → {len(validated_clusters)} valid")
+        if len(validated_clusters) < len(dense_clusters):
+            logger.info(f"  Rejected {len(dense_clusters) - len(validated_clusters)} clusters (scene cuts or invalid)")
+
+        # Extract single frames
         single_frames = selection_plan.get('single_frames', [])
 
-        # Validate coverage of question types
+        # ✅ NEW: Ensure spatial coverage across full video timeline
+        logger.info(f"\n🗺️  Ensuring spatial coverage across video timeline...")
+        single_frames = self.ensure_spatial_coverage(
+            selected_frames=single_frames,
+            highlights=highlights,  # ✅ IMPROVED: Use Phase 3 highlights instead of Phase 2 visual samples
+            video_duration=video_duration,
+            num_segments=6,
+            min_frames_per_segment=3
+        )
+
+        # Validate coverage of question types (CRITICAL - cannot be neglected)
         coverage = self._validate_type_coverage(single_frames)
 
-        logger.info(f"Selected {len(single_frames)} single frames + {len(dense_clusters)} dense clusters")
-        logger.info(f"Type coverage: {coverage['covered_types']}/{coverage['total_types']}")
+        logger.info(f"Selected {len(single_frames)} single frames + {len(validated_clusters)} validated clusters")
+        logger.info(f"Type coverage: {coverage['covered_types']}/{coverage['total_types']} ({coverage['coverage_ratio']:.1%})")
+        if coverage['missing_types']:
+            logger.warning(f"  Missing types: {', '.join(coverage['missing_types'])}")
+
+        # Preserve cost_summary from selection_plan
+        cost_summary = selection_plan.get('cost_summary', {})
 
         return {
             'selection_plan': single_frames,
-            'dense_clusters': dense_clusters,
-            'coverage': coverage
+            'dense_clusters': validated_clusters,  # Return validated clusters only
+            'coverage': coverage,  # Preserve coverage statistics
+            'cost_summary': cost_summary  # Preserve cost tracking!
         }
+
+    def _validate_cluster_coherence(
+        self,
+        cluster: Dict,
+        visual_samples: List[Dict]
+    ) -> Tuple[bool, str]:
+        """
+        Layer 4: Validate cluster coherence using structured validation fields.
+
+        Args:
+            cluster: Dense cluster dict from Claude with validation fields
+            visual_samples: Visual samples to cross-check scene_types
+
+        Returns:
+            (is_valid: bool, rejection_reason: str)
+        """
+        # Check 1: Validation fields present
+        validation = cluster.get('validation', {})
+        if not validation:
+            logger.debug("Cluster missing validation fields, allowing through (legacy format)")
+            return True, ""  # Allow legacy format without validation fields
+
+        # Check 2: Must NOT be a scene cut
+        if validation.get('is_scene_cut', False):
+            return False, "Marked as scene cut by Claude"
+
+        # Check 3: Must have same scene_type
+        if not validation.get('same_scene_type', False):
+            return False, "Different scene_types detected"
+
+        # Check 4: Must be same location
+        if not validation.get('same_location', False):
+            return False, "Different locations detected"
+
+        # Check 5: Must have continuous action
+        if not validation.get('continuous_action', False):
+            return False, "No continuous action detected"
+
+        # Check 6: Verify scene_type_consistent flag
+        if not cluster.get('scene_type_consistent', True):  # Default True for legacy
+            return False, "scene_type_consistent is false"
+
+        # Check 7: Cross-validate with actual scene_types array
+        scene_types = cluster.get('scene_types', [])
+        if len(scene_types) >= 2:
+            # All scene_types must be identical
+            first_scene_type = scene_types[0]
+            if not all(st == first_scene_type for st in scene_types):
+                actual_types = " → ".join(scene_types)
+                return False, f"Scene type mismatch: {actual_types} (this is a scene cut!)"
+
+        # Check 8: Cross-validate with visual_samples
+        start = cluster['start']
+        end = cluster['end']
+
+        cluster_samples = [
+            s for s in visual_samples
+            if start <= s['timestamp'] <= end
+        ]
+
+        if cluster_samples:
+            sample_scene_types = [s.get('scene_type', 'unknown') for s in cluster_samples]
+            unique_scene_types = set(sample_scene_types)
+
+            if len(unique_scene_types) > 1:
+                return False, f"Visual samples show scene type changes: {unique_scene_types}"
+
+        # Passed all checks
+        return True, ""
+
+    # ✅ NEW FUNCTION: Ensure spatial coverage
+    def ensure_spatial_coverage(
+        self,
+        selected_frames: List[Dict],
+        highlights: List[Dict],
+        video_duration: float,
+        num_segments: int = 6,
+        min_frames_per_segment: int = 3
+    ) -> List[Dict]:
+        """
+        Ensure every time segment has minimum frames for Phase 8 distribution.
+
+        This prevents Phase 8 from having segments with 0 available frames,
+        which would break the spatial distribution goal.
+
+        Architecture:
+        - Phase 5 selects based on quality (highlights)
+        - This ensures based on coverage (spatial distribution)
+        - Together = quality + coverage ✅
+
+        Args:
+            selected_frames: Frames already selected by Claude
+            highlights: Phase 3 highlights (multi-signal fusion - better than Phase 2)
+            video_duration: Total video duration in seconds
+            num_segments: Number of time segments (default: 6)
+            min_frames_per_segment: Minimum frames needed per segment (default: 3)
+
+        Returns:
+            selected_frames with gap-filling frames added
+        """
+        logger.info(f"   Ensuring spatial coverage ({num_segments} segments)...")
+
+        # Create time segments
+        segment_duration = video_duration / num_segments
+        segments = []
+        for i in range(num_segments):
+            start = i * segment_duration
+            end = (i + 1) * segment_duration if i < num_segments - 1 else video_duration
+            segments.append({
+                'id': i,
+                'start': start,
+                'end': end,
+                'frames': []
+            })
+
+        # Assign selected frames to segments
+        for frame in selected_frames:
+            timestamp = frame['timestamp']
+            for seg in segments:
+                if seg['start'] <= timestamp < seg['end']:
+                    seg['frames'].append(frame)
+                    break
+
+        # Identify gaps and fill them
+        gap_filled_frames = list(selected_frames)  # Copy existing
+        total_gaps_filled = 0
+
+        for seg in segments:
+            current_count = len(seg['frames'])
+
+            if current_count < min_frames_per_segment:
+                gap = min_frames_per_segment - current_count
+                logger.info(f"   Segment {seg['id']} ({seg['start']:.0f}-{seg['end']:.0f}s): "
+                           f"{current_count} frames → filling {gap} gaps")
+
+                # ✅ IMPROVED: Find Phase 3 highlights in this segment NOT already selected
+                selected_timestamps = {f['timestamp'] for f in selected_frames}
+
+                segment_highlights = [
+                    h for h in highlights
+                    if seg['start'] <= h['timestamp'] < seg['end']
+                    and h['timestamp'] not in selected_timestamps
+                ]
+
+                if not segment_highlights:
+                    logger.warning(f"      ⚠️  No Phase 3 highlights available in segment {seg['id']}, skipping")
+                    continue
+
+                # ✅ IMPROVED: Sort by combined_score (multi-signal fusion)
+                # This is better than BRISQUE quality alone as it includes audio + visual + semantic
+                segment_highlights.sort(
+                    key=lambda h: h.get('combined_score', 0),
+                    reverse=True
+                )
+
+                # Take top highlights to fill gap
+                selected_highlights = segment_highlights[:gap]
+                logger.info(f"      Using {len(selected_highlights)} Phase 3 highlights (combined_score based)")
+
+                # Add selected highlights to fill gap
+                for highlight in selected_highlights:
+                    combined_score = highlight.get('combined_score', 0.5)
+                    audio_score = highlight.get('audio_score', 0)
+                    visual_score = highlight.get('visual_score', 0)
+                    semantic_score = highlight.get('semantic_score', 0)
+
+                    # ✅ IMPROVED: Convert Phase 3 highlight to Phase 5 frame format
+                    # Include all multi-signal scores for better transparency
+                    gap_frame = {
+                        'timestamp': highlight['timestamp'],
+                        'reason': f"Gap-fill (highlight score: {combined_score:.3f})",
+                        'question_types': ['Context', 'General Holistic Reasoning'],  # Generic types
+                        'priority': combined_score * 0.9,  # ✅ REDUCED PENALTY: 10% (was 20%)
+                        'audio_score': audio_score,
+                        'visual_score': visual_score,
+                        'semantic_score': semantic_score,
+                        'is_gap_fill': True  # Mark as gap-fill
+                    }
+                    gap_filled_frames.append(gap_frame)
+                    total_gaps_filled += 1
+                    logger.info(f"      ✓ Added gap-fill frame at {highlight['timestamp']:.1f}s "
+                               f"(combined_score={combined_score:.3f}, priority={gap_frame['priority']:.2f})")
+            else:
+                logger.info(f"   Segment {seg['id']} ({seg['start']:.0f}-{seg['end']:.0f}s): "
+                           f"{current_count} frames ✅")
+
+        logger.info(f"   Total frames: {len(selected_frames)} → {len(gap_filled_frames)} "
+                   f"(+{total_gaps_filled} gap-fills)")
+
+        return gap_filled_frames
 
     def _build_visual_context(self, visual_samples: List[Dict]) -> str:
         """Build concise visual context summary from samples"""
@@ -200,9 +454,11 @@ class LLMFrameSelector:
     ) -> Dict:
         """Call Claude for intelligent frame selection"""
 
-        # Calculate target range (80-120 frames based on quality)
-        min_target = max(47, int(frame_budget * 0.53))  # 80 frames for 150 budget
-        max_target = int(frame_budget * 0.80)  # 120 frames for 150 budget
+        # Target 120-150 frames for ~60 questions (after Phase 8 filters duplicates)
+        # Previous issue: Claude was too conservative, selecting only ~40 frames
+        # Fix: Clear instruction that 120-150 is the FINAL count, no post-filtering
+        min_target = max(47, int(frame_budget * 0.80))  # 120 frames for 150 budget
+        max_target = int(frame_budget * 1.00)  # 150 frames for 150 budget
 
         prompt = f"""You are selecting frames from a {video_duration:.1f}s video for adversarial multimodal question generation.
 
@@ -222,183 +478,182 @@ OBJECTIVE CRITERIA FOR 13 QUESTION TYPES
 
 1. TEMPORAL UNDERSTANDING
    ✓ Evidence: Multiple highlights across video showing changes/progression
-   ✓ Example: "3 topic shifts at 10s, 45s, 80s showing presentation flow"
 
 2. SEQUENTIAL
    ✓ Evidence: Ordered events/steps visible in visual context
-   ✓ Example: "Step-by-step demo: setup (15s) → execution (30s) → results (50s)"
 
 3. SUBSCENE
    ✓ Evidence: Continuous action sequence within same scene (4+ highlights within 10s)
-   ✓ Evidence: Multi-step process with intermediate stages (setup → execution → result)
-   ✓ Example: "Door opening sequence: hand on handle (5s) → turning (6s) → pulling (7s) → entering (9s)"
-   ✓ Example: "Cooking sequence: chopping (15s) → mixing (18s) → pouring (22s) in same kitchen scene"
 
 4. GENERAL HOLISTIC REASONING
-   ✓ Evidence: Rich visual context (objects, people, actions) spanning multiple timestamps
-   ✓ Example: "Complex scene: 5 people, whiteboard with diagrams, laptop screens visible"
+   ✓ Evidence: Rich visual context (objects, people, actions)
 
 5. INFERENCE
-   ✓ Evidence: Visual cues suggesting implicit information (reactions, gestures, expressions)
-   ✓ Example: "Audience leaning forward, note-taking → implies engagement/important moment"
+   ✓ Evidence: Visual cues suggesting implicit information
 
 6. CONTEXT
-   ✓ Evidence: Environmental details (scene_type, objects) providing situational context
-   ✓ Example: "Conference room setting, professional attire, presentation screen → business context"
+   ✓ Evidence: Environmental details providing situational context
 
 7. NEEDLE
-   ✓ Evidence: Readable text in text_detected field (OCR)
-   ✓ Example: "Text visible: 'Q3 Revenue: $2.5M' at 25.3s"
+   ✓ Evidence: Readable text in text_detected field
 
 8. REFERENTIAL GROUNDING
-   ✓ Evidence: 2+ objects detected in same frame (ALWAYS triggers this type)
-   ✓ Evidence: Objects with spatial relationships or specific attributes
-   ✓ Example: "Laptop (left), coffee cup (center), notebook (right) - spatial positions"
-   ✓ Example: "Man holding blue ring + 2 objects detected - object interaction with attributes"
-
-   CRITICAL RULE: If frame has 2+ objects detected (from YOLO), you MUST include
-   "Referential Grounding" in question_types array. This is non-negotiable.
+   ✓ Evidence: 2+ objects detected in same frame
 
 9. COUNTING
-   ✓ Evidence: Multiple instances of same object type (people, chairs, screens)
-   ✓ Example: "8 people detected via poses at 15.2s"
+   ✓ Evidence: Multiple instances of same object type
 
 10. COMPARATIVE
-    ✓ Evidence: Contrasting visual elements across timestamps (before/after, A vs B)
-    ✓ Example: "Empty room (5s) vs full audience (20s)"
+    ✓ Evidence: Contrasting visual elements across timestamps
 
 11. OBJECT INTERACTION REASONING
-    ✓ Evidence: Person-object interactions visible (poses + objects in same frame)
-    ✓ Example: "Person holding microphone (pose + object: microphone detected)"
+    ✓ Evidence: Person-object interactions visible
 
-12. AUDIO-VISUAL STITCHING
-    ✓ Evidence: High audio_score + rich visual context at same timestamp
-    ✓ Example: "Audio peak (0.85) + speaker gesturing + slide change at 32.1s"
+12. AUDIO-VISUAL STITCHING ⚠️  STRICT VALIDATION REQUIRED
+    ✓ Evidence: High audio_score + rich visual context
+
+    ⚠️  CRITICAL: Audio MUST describe what's visible in frame!
+
+    Before assigning "Audio-Visual Stitching", verify ONE of these:
+
+    ✅ VALID Audio-Visual Stitching (assign this type):
+
+    1. OBJECT REFERENCE: Speech mentions object in detected_objects list
+       Example: "this model" + detected_objects: ["person", "toy"] ✅
+       Example: "that container" + detected_objects: ["bottle", "cup"] ✅
+       Example: "the device" + detected_objects: ["cell phone", "remote"] ✅
+
+    2. ACTION NARRATION: Speech describes visible action/motion
+       Example: "object moving left" + motion detected + direction ✅
+       Example: "reaching for the item" + pose_count > 0 + motion ✅
+       Example: "combining materials" + object_interaction visible ✅
+
+    3. COUNTING CUE: Speech mentions quantity matching visual count
+       Example: "multiple items" + 5+ detected_objects ✅
+       Example: "three instances" + 3 similar objects detected ✅
+       Example: "six repetitions" + repetitive action 6 times ✅
+
+    4. SCENE DESCRIPTION: Speech names the scene/environment
+       Example: "indoors" + scene_type: "indoor" ✅
+       Example: "in this workspace" + scene_type: "conference_room" ✅
+       Example: "outside" + scene_type contains "outdoor" ✅
+
+    ❌ INVALID Audio-Visual Stitching (DO NOT assign):
+
+    1. Generic speech + unrelated visual
+       Example: "this is important" + random objects ❌
+       Example: "great example" + unrelated scene ❌
+
+    2. Audio peak + motion peak (coincidence, not description)
+       Example: loud music + camera pan (audio doesn't describe pan) ❌
+       Example: volume spike + motion (no semantic link) ❌
+
+    3. Topic shift + scene change (editing, not alignment)
+       Example: "now let's discuss X" + new scene (just a cut) ❌
+       Example: "next topic" + different location (transition) ❌
+
+    4. Emphasis without visual reference
+       Example: "this is extremely important!" + no specific object mentioned ❌
+       Example: "pay attention!" + generic scene ❌
+
+    VALIDATION CHECKLIST for "Audio-Visual Stitching":
+    ☐ Does audio provide a temporal/contextual anchor for the visual?
+    ☐ Would answering this require BOTH audio AND visual information?
+    ☐ Can the answer be determined from visual alone? (If YES → reject)
+    ☐ Can the answer be determined from audio alone? (If YES → reject)
+
+    Audio-Visual Stitching is VALID if:
+    - Audio and visual are temporally synchronized (happen together)
+    - Question requires integrating BOTH modalities
+    - Answer cannot be determined from single modality
+
+    Accept these patterns:
+    ✓ Speech mentions object → visual shows object
+    ✓ Sound effect → visual shows source of sound
+    ✓ Music change → visual shows corresponding action/transition
+    ✓ Silence → visual shows dramatic moment
+
+    If audio and visual are unrelated → DO NOT assign "Audio-Visual Stitching"
+    → Assign "General Holistic Reasoning" or "Context" instead
 
 13. TACKLING SPURIOUS CORRELATIONS
-    ✓ Evidence: Unusual/unexpected context (surprising scene_type, atypical objects for setting)
-    ✓ Example: "Outdoor scene with server racks (atypical equipment for outdoor setting)"
+    ✓ Evidence: Unusual/unexpected context
 
 ═══════════════════════════════════════════════════════════════════════════════
-TWO-PASS SELECTION ALGORITHM (FOLLOW EXACTLY IN ORDER)
+CLUSTER REQUIREMENTS (CRITICAL - READ CAREFULLY)
 ═══════════════════════════════════════════════════════════════════════════════
 
-PASS 1: Must-Have Frames
-Execute these steps in order:
-  1. Select ALL frames with priority ≥0.85 (high-quality highlights)
-  2. Select ALL frames with text detected (for Needle questions)
-     - Use actual highlight score if available
-     - Otherwise assign priority = 0.75
-  3. Select ALL frames with 5+ objects OR 5+ people (for Counting/Interaction questions)
-     - Use actual highlight score if available
-     - Otherwise assign priority = 0.75
-  4. Identify dense clusters (4+ highlights within 10s continuous action)
-     - Sample 5-8 frames per cluster, evenly spaced
-     - Assign priority = 0.75 for cluster frames
-  5. Count total frames selected → Store as PASS1_COUNT
+CLUSTER VALIDATION (Flexible but Effective):
 
-PASS 2: Gap-Filling (MANDATORY IF PASS1_COUNT < 80)
-This pass is MANDATORY. You cannot skip it. Execute these steps:
+PRIORITY 1 - MUST HAVE (Hard Requirements):
+✓ No drastic visual changes (ImageHash diff < adaptive_threshold)
+✓ Same physical location (spatial consistency across frames)
+✓ Temporal continuity (no gaps > 3 seconds between frames)
+✓ Optimal duration: 5-15 seconds (min: 4s, max: 20s)
 
-  Step 1: Check if Pass 2 is required
-    IF PASS1_COUNT ≥ 80 → Skip to Coverage Check
-    IF PASS1_COUNT < 80 → CONTINUE with Pass 2 (you MUST do this)
+PRIORITY 2 - SHOULD HAVE (Soft Requirements):
+✓ Scene_type similarity (allow minor BLIP-2 labeling variations)
+  → "indoor_basketball_court" vs "basketball_game" = SAME SCENE ✓
+  → "indoor_medium" vs "conference_room" = DIFFERENT SCENES ✗
+✓ Related actions (causal/temporal link between frames)
+✓ Object consistency (similar objects across frames)
 
-  Step 2: Calculate frames needed
-    FRAMES_NEEDED = 80 - PASS1_COUNT
-    Target: Add approximately FRAMES_NEEDED frames
+PRIORITY 3 - NICE TO HAVE (Bonus):
+✓ 4+ frames within 10 seconds (high density)
+✓ Clear progression (beginning → middle → end)
 
-  Step 3: Identify temporal gaps
-    • List all selected frames in order by timestamp
-    • Calculate gaps between consecutive frames
-    • Mark gaps >40 seconds as "qualifying gaps"
-    • Example: Frames at [10s, 55s, 100s] → Gaps of [45s, 45s] → Both qualify
+CLUSTER TEMPORAL WINDOW GUIDELINES:
+Optimal cluster duration: 5-15 seconds
+- Minimum: 4 seconds (need enough context for multi-step reasoning)
+- Maximum: 20 seconds (avoid scene cuts, maintain coherence)
 
-  Step 4: Fill gaps (repeat until FRAMES_NEEDED satisfied OR no frames available)
-    FOR each qualifying gap (>40s):
-      • Find frames in that gap with priority ≥0.75
-      • Select 1-2 frames from gap (prefer higher priority)
-      • Add frames to selection
-      • Update count
-      IF total frames ≥80 → STOP
-      IF no more priority ≥0.75 frames available → STOP
+DURATION BY CLUSTER TYPE:
+- Fast action (sports, combat, games): 5-10 seconds
+- Process/sequence (cooking, assembly, crafts): 8-15 seconds
+- Transformation (construction, timelapse): 10-20 seconds
 
-  Step 5: Store final count → PASS2_COUNT
+FORBIDDEN DURATIONS:
+❌ < 4 seconds (too short for temporal reasoning)
+❌ > 25 seconds (high risk of scene cuts, context shift)
 
-  Step 6: Document execution
-    Record: pass2_executed = true
-    Record: frames_added = PASS2_COUNT - PASS1_COUNT
+CLUSTER VALIDATION CHECKLIST - Verify for EACH proposed cluster:
+☐ No scene cuts detected by ImageHash? (diff < threshold)
+   → If scene cut detected: REJECT cluster
+☐ Same physical location across frames?
+   → If location changes: REJECT cluster
+☐ No temporal gaps > 3 seconds?
+   → If large gap: REJECT cluster
+☐ Scene_type labels reasonably similar? (allow BLIP-2 noise)
+   → If completely different contexts (office→street): REJECT
+☐ Duration between 5-20 seconds?
+   → If < 4s or > 25s: REJECT cluster
 
-COVERAGE CHECK (After Pass 2 Completes)
-  1. Count question types covered
-  2. IF coverage <11/13 types:
-     - Identify missing types
-     - For each missing type, add 2-3 targeted frames (priority ≥0.70)
-     - Special attention to Referential Grounding:
-       * If missing, select frames with 2+ objects detected
-       * Ensure objects have spatial relationships or attributes
+FORBIDDEN CLUSTER TYPES (AUTO-REJECT):
+✗ "Scene transition sequence" = SCENE CUT, not cluster
+   → Example: indoor_medium (111s) → conference_room (113s)
+   → This is TWO DIFFERENT SCENES, REJECT!
+✗ "Location change sequence" = SCENE CUT, not cluster
+   → Example: office → hallway → conference room
+   → Multiple locations = scene cuts, REJECT!
+✗ "Topic shift sequence" = CONTENT CUT, not cluster
+   → Example: interview → demonstration → interview
+   → Content discontinuity = cut, REJECT!
 
-CLUSTER DETECTION (After All Frames Selected)
-  1. Scan all selected frames for consecutive sequences (<5s gaps)
-  2. IF 3+ consecutive frames show related actions → Dense cluster
-  3. Add to dense_clusters array
-  4. Tag all cluster frames with "Subscene" type
+VALID CLUSTER EXAMPLES:
+✓ "Continuous action - 4 frames showing repeated motion in same location (scene_type: indoor)"
+   → Same location, continuous action = VALID
+✓ "Process sequence - step 1 → step 2 → step 3 in same workspace (scene_type: indoor)"
+   → Same location, related actions = VALID
+✓ "Presentation gestures - 3 consecutive gestures at whiteboard (scene_type: conference_room)"
+   → Same location, continuous action = VALID
 
-STOP CONDITIONS (Check in Order)
-  1. IF frames ≥{max_target} → STOP (maximum reached)
-  2. IF frames ≥80 AND coverage ≥12/13 → STOP (mission accomplished)
-  3. IF frames <80 but no priority ≥0.75 frames remain → STOP (accept count)
-
-═══════════════════════════════════════════════════════════════════════════════
-EXECUTION CHECKLIST (Verify Before Outputting JSON)
-═══════════════════════════════════════════════════════════════════════════════
-
-Before returning JSON, verify you completed these steps:
-  ✓ Pass 1 executed, counted frames → PASS1_COUNT = ?
-  ✓ IF PASS1_COUNT < 80 → Pass 2 MUST have executed
-  ✓ Pass 2 identified gaps >40s → How many gaps found?
-  ✓ Pass 2 added frames from gaps → How many frames added?
-  ✓ Final count → PASS2_COUNT = ?
-  ✓ Coverage check completed → Missing types addressed?
-  ✓ Cluster detection completed → Sequences identified?
-  ✓ All frames with 2+ objects include "Referential Grounding" type
+INVALID CLUSTER EXAMPLES (NEVER CREATE THESE):
+✗ "Scene transition: indoor_medium → conference_room" = SCENE CUT
+✗ "Location change: office → hallway" = SCENE CUT
+✗ Any cluster with "→" indicating scene_type change = SCENE CUT
 
 ═══════════════════════════════════════════════════════════════════════════════
-PRIORITY ASSIGNMENT RULES
-═══════════════════════════════════════════════════════════════════════════════
-
-✓ High-quality highlights (≥0.85): Use actual highlight score
-✓ Text detection frames: Use highlight score OR 0.75 minimum
-✓ Object/people-rich frames (5+): Use highlight score OR 0.75 minimum
-✓ Dense cluster frames: Assign 0.75
-✓ Gap-filling frames (Pass 2): Must be ≥0.75 from highlights
-✓ Coverage gap frames: Can use 0.70-0.75 if solving missing type
-✓ Spurious Correlations: Can use 0.50-0.74 for true anomalies
-✗ Never use priority <0.50 (indicates poor quality)
-
-SPECIAL CASE: Video end frames
-  • If unusual context (e.g., "black cat flying") for Spurious Correlations
-  • Priority 0.50-0.60 acceptable IF clearly anomalous
-  • BUT prefer priority ≥0.70 if available
-
-═══════════════════════════════════════════════════════════════════════════════
-EXAMPLES OF GOOD VS BAD REASONING
-═══════════════════════════════════════════════════════════════════════════════
-
-✓ GOOD: "Audio peak (0.92) + speaker pointing at slide with 'Budget' text → Audio-Visual Stitching + Needle"
-✓ GOOD: "Scene change: conference_room → outdoor (scene_type) + 3 highlights within 5s → Subscene + dense cluster candidate"
-✓ GOOD: "7 people detected (poses) at single timestamp → Counting"
-✓ GOOD: "Empty stage (10s) vs full audience (45s) → Comparative"
-✓ GOOD: "Gap 92s→136s (44 seconds) filled with priority 0.78 frame showing 5 people + high semantic (0.90)"
-
-✗ AVOID: "Mid-section coverage" (vague, not evidence-based)
-✗ AVOID: "Temporal distribution" (gap-filling without justification)
-✗ AVOID: "Between highlights" (filler reasoning)
-✗ AVOID: "Sequential question opportunity" (cycling through types without evidence)
-✗ AVOID: "quality:0.0 indicates anomaly, priority 0.0" (too low, no value)
-
-═══════════════════════════════════════════════════════════════════════════════
-OUTPUT FORMAT
+OUTPUT FORMAT WITH VALIDATION FIELDS
 ═══════════════════════════════════════════════════════════════════════════════
 
 Return ONLY valid JSON with this EXACT structure:
@@ -418,7 +673,7 @@ Return ONLY valid JSON with this EXACT structure:
   "single_frames": [
     {{
       "timestamp": 10.5,
-      "reason": "Audio peak (0.88) + topic shift (semantic: 0.95) + clear BLIP-2 caption",
+      "reason": "Audio peak (0.88) + topic shift (semantic: 0.95)",
       "question_types": ["Audio-Visual Stitching", "Temporal Understanding"],
       "priority": 0.95
     }}
@@ -428,7 +683,16 @@ Return ONLY valid JSON with this EXACT structure:
       "start": 45.0,
       "end": 52.0,
       "frame_count": 7,
-      "reason": "5 highlights within 7s, continuous action sequence, scene change midpoint"
+      "reason": "Basketball dribbling sequence in same indoor court (scene_type: basketball_court_indoor)",
+      
+      "scene_types": ["basketball_court_indoor", "basketball_court_indoor", "basketball_court_indoor"],
+      "scene_type_consistent": true,
+      "validation": {{
+        "same_scene_type": true,
+        "same_location": true,
+        "continuous_action": true,
+        "is_scene_cut": false
+      }}
     }}
   ],
   "coverage": {{
@@ -439,58 +703,78 @@ Return ONLY valid JSON with this EXACT structure:
   }}
 }}
 
+CRITICAL VALIDATION FIELD REQUIREMENTS:
+✓ scene_types: Array of scene_type from EACH frame in cluster (check visual context)
+✓ scene_type_consistent: true if all scene_types identical, false otherwise
+✓ validation.same_scene_type: MUST be true for valid cluster
+✓ validation.same_location: MUST be true for valid cluster
+✓ validation.continuous_action: MUST be true for valid cluster
+✓ validation.is_scene_cut: MUST be false for valid cluster
+
+CLUSTER REASON FORMAT:
+✓ GOOD: "Continuous action in same scene_type" (e.g., "Dribbling in basketball_court_indoor")
+✗ BAD: "Scene transition" or "X → Y" (indicates scene cut)
+
 ═══════════════════════════════════════════════════════════════════════════════
 FINAL CHECKLIST (Verify Before Submitting)
 ═══════════════════════════════════════════════════════════════════════════════
 
-Before returning JSON, verify ALL of these:
+CLUSTER VALIDATION (CRITICAL):
+✓ Every cluster has ALL frames with SAME scene_type (verify in visual context)
+✓ Cluster scene_types array shows identical values
+✓ Cluster scene_type_consistent = true
+✓ Cluster validation.is_scene_cut = false
+✓ Cluster validation.same_scene_type = true
+✓ Cluster validation.same_location = true
+✓ Cluster validation.continuous_action = true
+✓ Cluster reasons describe continuous action (NOT "scene transition")
+✓ NO clusters with "→" or scene_type changes in reason
+
+COVERAGE (MUST BE MAINTAINED):
+✓ ALL frames with 2+ objects include "Referential Grounding" type
+✓ Coverage ≥11/13 types (85% minimum)
+✓ Missing types documented in coverage.missing_types
 
 FRAME COUNT:
-✓ execution_summary.pass1_count documented (how many after Pass 1)
-✓ IF pass1_count < 80 → execution_summary.pass2_executed MUST be true
-✓ execution_summary.pass2_count documented (how many after Pass 2)
-✓ Total frames in single_frames = pass2_count (numbers match)
-✓ Total frames between 80-120 (unless no qualifying frames available)
-
-GAP ANALYSIS:
-✓ execution_summary.gap_analysis shows gaps identified
-✓ IF pass1_count < 80 → gap_analysis.qualifying_gaps_over_40s > 0
-✓ IF qualifying gaps found → gap_analysis.gaps_filled > 0
-
-QUALITY:
-✓ Every frame has specific evidence-based reasoning (no generic phrases)
-✓ Priority ≥0.75 for special case frames (text, objects, clusters)
-✓ Priority ≥0.50 for all frames (no frames below this threshold)
-✓ Question types assigned ONLY when objective criteria met
-
-COVERAGE:
-✓ ALL frames with 2+ objects include "Referential Grounding" type
-✓ Dense clusters populated if sequences found (3+ frames <5s apart)
-✓ All cluster frames tagged with "Subscene" type
-✓ Coverage ≥11/13 types (85% minimum)
-
-CRITICAL: If pass2_executed = false AND pass2_count < 80, you made an error.
-Go back and execute Pass 2 properly before submitting JSON.
+✓ Total frames between 120-150 (prioritize BOTH quality and comprehensive coverage)
+✓ Pass 2 executed if Pass 1 < 120 frames
+✓ This is the final selection - no post-filtering will occur
 
 JSON:"""
 
         try:
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=10000,  # Increased to handle 150 frames (~100 tokens per frame)
+                max_tokens=10000,
                 temperature=0,
                 messages=[{"role": "user", "content": prompt}]
             )
+
+            # Capture token usage from response
+            usage = response.usage
+            input_tokens = usage.input_tokens
+            output_tokens = usage.output_tokens
+            total_tokens = input_tokens + output_tokens
+
+            # Calculate cost (Claude Sonnet 4.5 pricing)
+            # Input: $3.00 per 1M tokens, Output: $15.00 per 1M tokens
+            input_cost = (input_tokens / 1_000_000) * 3.00
+            output_cost = (output_tokens / 1_000_000) * 15.00
+            total_cost = input_cost + output_cost
+
+            logger.info(f"Claude API call completed:")
+            logger.info(f"  Input tokens:  {input_tokens:,}")
+            logger.info(f"  Output tokens: {output_tokens:,}")
+            logger.info(f"  Total tokens:  {total_tokens:,}")
+            logger.info(f"  Cost: ${total_cost:.4f} (input: ${input_cost:.4f}, output: ${output_cost:.4f})")
 
             response_text = response.content[0].text.strip()
 
             # Strip markdown code fences if present
             if response_text.startswith('```'):
-                # Remove opening fence (```json or ```)
                 lines = response_text.split('\n')
                 if lines[0].startswith('```'):
                     lines = lines[1:]
-                # Remove closing fence
                 if lines and lines[-1].strip() == '```':
                     lines = lines[:-1]
                 response_text = '\n'.join(lines).strip()
@@ -498,94 +782,45 @@ JSON:"""
             # Parse JSON
             selection_plan = json.loads(response_text)
 
-            # DEBUG: Check what keys Claude actually returned
-            logger.info(f"DEBUG - Keys in Claude response: {list(selection_plan.keys())}")
-            logger.info(f"DEBUG - Frames in 'single_frames': {len(selection_plan.get('single_frames', []))}")
-
             # Log execution summary
             exec_summary = selection_plan.get('execution_summary', {})
             pass1_count = exec_summary.get('pass1_count', 0)
             pass2_executed = exec_summary.get('pass2_executed', False)
             pass2_count = exec_summary.get('pass2_count', 0)
             frames_added = exec_summary.get('frames_added_pass2', 0)
-            gap_analysis = exec_summary.get('gap_analysis', {})
 
             logger.info(f"Pass 1: {pass1_count} frames selected")
             logger.info(f"Pass 2 executed: {pass2_executed}")
             if pass2_executed:
                 logger.info(f"Pass 2: Added {frames_added} frames → Total: {pass2_count}")
-                logger.info(f"Gap analysis: {gap_analysis.get('qualifying_gaps_over_40s', 0)} qualifying gaps, {gap_analysis.get('gaps_filled', 0)} gaps filled")
 
             # Validate frame count
             single_count = len(selection_plan.get('single_frames', []))
             cluster_count = sum(c['frame_count'] for c in selection_plan.get('dense_clusters', []))
             total_frames = single_count + cluster_count
 
-            min_target = max(47, int(frame_budget * 0.53))  # 80 frames for 150 budget
-            max_target = int(frame_budget * 0.80)  # 120 frames for 150 budget
+            logger.info(f"Claude selected {total_frames} frames ({single_count} single + {cluster_count} in clusters)")
 
-            # Verify execution_summary matches actual selection
-            if pass2_count != total_frames:
-                logger.warning(f"Mismatch: execution_summary.pass2_count={pass2_count} but single_frames+clusters has {total_frames} frames")
-
-            # Verify Pass 2 was executed if needed
-            if pass1_count < 80 and not pass2_executed:
-                logger.error(f"CRITICAL ERROR: Pass 1 had {pass1_count} frames (<80) but Pass 2 was not executed!")
-                logger.error("Claude did not follow the mandatory two-pass algorithm.")
-                logger.error("Triggering fallback selection...")
-                return self._fallback_selection(highlights, frame_budget, video_duration)
-
-            if pass2_executed and pass2_count < 80:
-                logger.warning(f"Pass 2 executed but only reached {pass2_count} frames (target: 80)")
-                logger.warning("This may indicate insufficient qualifying frames in the video.")
-
-            if total_frames < min_target:
-                logger.warning(f"Claude selected {total_frames} frames (below target {min_target}-{max_target}). Accepting - may indicate low video quality or no qualifying frames.")
-            elif total_frames > max_target:
-                logger.warning(f"Claude selected {total_frames} frames (above target {min_target}-{max_target}). Accepting - prompt should handle this, but monitor for issues.")
-            else:
-                logger.info(f"Claude selected {total_frames} frames (within target range {min_target}-{max_target})")
+            # Add cost summary to selection_plan
+            selection_plan['cost_summary'] = {
+                'claude_api_call': {
+                    'input_tokens': input_tokens,
+                    'output_tokens': output_tokens,
+                    'total_tokens': total_tokens,
+                    'input_cost': round(input_cost, 4),
+                    'output_cost': round(output_cost, 4),
+                    'total_cost': round(total_cost, 4)
+                }
+            }
 
             return selection_plan
 
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse Claude response: {e}")
-            logger.error(f"Response: {response_text}")
-            # Fallback to simple selection
             return self._fallback_selection(highlights, frame_budget, video_duration)
         except Exception as e:
             logger.error(f"Error in Claude frame selection: {e}")
             return self._fallback_selection(highlights, frame_budget, video_duration)
-
-    def _adjust_frame_count(self, selection_plan: Dict, target: int) -> Dict:
-        """Adjust frame count to match target"""
-        single_frames = selection_plan.get('single_frames', [])
-        dense_clusters = selection_plan.get('dense_clusters', [])
-
-        current_count = len(single_frames) + sum(c['frame_count'] for c in dense_clusters)
-
-        if current_count < target:
-            # Add more single frames from top of list
-            diff = target - current_count
-            logger.info(f"Adding {diff} frames to reach target")
-            # Just duplicate some high-priority frames with small time offsets
-            for i in range(diff):
-                if single_frames:
-                    base_frame = single_frames[i % len(single_frames)]
-                    new_frame = base_frame.copy()
-                    new_frame['timestamp'] += 0.5 * (i + 1)
-                    single_frames.append(new_frame)
-
-        elif current_count > target:
-            # Remove excess single frames
-            diff = current_count - target
-            logger.info(f"Removing {diff} frames to reach target")
-            single_frames = single_frames[:-diff]
-
-        return {
-            'single_frames': single_frames,
-            'dense_clusters': dense_clusters
-        }
 
     def _fallback_selection(
         self,
@@ -597,9 +832,8 @@ JSON:"""
         logger.warning("Using fallback frame selection")
 
         single_frames = []
-        max_target = int(frame_budget * 0.80)  # 120 frames for 150 budget
+        max_target = int(frame_budget * 0.80)
 
-        # Take top highlights (up to max_target)
         for i, h in enumerate(highlights[:max_target]):
             single_frames.append({
                 'timestamp': h['timestamp'],
@@ -608,33 +842,18 @@ JSON:"""
                 'priority': h['combined_score']
             })
 
-        # Only add evenly spaced frames if we have very few highlights
-        min_acceptable = max(47, int(frame_budget * 0.53))  # 80 frames for 150 budget
-        if len(single_frames) < min_acceptable:
-            remaining = min_acceptable - len(single_frames)
-            interval = video_duration / (remaining + 1)
-            existing_timestamps = {f['timestamp'] for f in single_frames}
-
-            for i in range(remaining):
-                timestamp = interval * (i + 1)
-                # Avoid duplicates (within 1 second)
-                if not any(abs(timestamp - t) < 1.0 for t in existing_timestamps):
-                    single_frames.append({
-                        'timestamp': timestamp,
-                        'reason': f"Temporal coverage: evenly spaced sample {i+1}/{remaining}",
-                        'question_types': ["General Holistic Reasoning"],
-                        'priority': 0.3  # Lower priority than highlights
-                    })
-
-            logger.info(f"Filled {remaining} additional frames to reach minimum (total: {len(single_frames)})")
-
         return {
             'single_frames': single_frames,
             'dense_clusters': []
         }
 
     def _validate_type_coverage(self, single_frames: List[Dict]) -> Dict:
-        """Validate coverage of question types"""
+        """
+        Validate coverage of question types.
+
+        CRITICAL: This ensures we have diverse question types across frames.
+        Cannot be neglected as it drives question generation quality.
+        """
         covered_types = set()
 
         for frame in single_frames:
@@ -656,74 +875,7 @@ JSON:"""
         top_n: int = 50,
         min_score: float = 0.3
     ) -> List[Dict]:
-        """
-        Get top N highlights above minimum score (static method for pipeline)
-
-        Args:
-            highlights: List of highlight dicts from universal_highlight_detector
-            top_n: Number of top highlights to return
-            min_score: Minimum combined_score threshold
-
-        Returns:
-            List of top N highlights sorted by score (descending)
-        """
-        # Filter by minimum score
+        """Get top N highlights above minimum score"""
         filtered = [h for h in highlights if h.get('combined_score', 0) >= min_score]
-
-        # Sort by combined_score descending
-        sorted_highlights = sorted(
-            filtered,
-            key=lambda x: x.get('combined_score', 0),
-            reverse=True
-        )
-
-        # Return top N
+        sorted_highlights = sorted(filtered, key=lambda x: x.get('combined_score', 0), reverse=True)
         return sorted_highlights[:top_n]
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-
-    # Test with mock data
-    selector = LLMFrameSelector()
-
-    mock_samples = [
-        {
-            'timestamp': 10.0,
-            'blip2_caption': 'A person presenting in a conference room',
-            'scene_type': 'conference_room',
-            'objects': ['person', 'laptop', 'screen'],
-            'text_detected': 'Welcome',
-            'poses': [{'keypoints': []}],
-            'quality': 1.0
-        },
-        {
-            'timestamp': 30.0,
-            'blip2_caption': 'Audience listening and taking notes',
-            'scene_type': 'auditorium',
-            'objects': ['person', 'chair', 'notebook'],
-            'text_detected': '',
-            'poses': [{'keypoints': []}, {'keypoints': []}],
-            'quality': 0.8
-        }
-    ]
-
-    mock_highlights = [
-        {'timestamp': 10.0, 'combined_score': 0.9, 'audio_score': 0.8, 'visual_score': 0.9, 'semantic_score': 0.95},
-        {'timestamp': 30.0, 'combined_score': 0.75, 'audio_score': 0.7, 'visual_score': 0.6, 'semantic_score': 0.8}
-    ]
-
-    mock_quality = {10.0: 1.0, 20.0: 0.8, 30.0: 0.8, 40.0: 0.5}
-
-    result = selector.select_frames(
-        mock_samples,
-        mock_highlights,
-        mock_quality,
-        frame_budget=50,
-        video_duration=60.0
-    )
-
-    print(f"\nSelection plan:")
-    print(f"  Single frames: {len(result['selection_plan'])}")
-    print(f"  Dense clusters: {len(result['dense_clusters'])}")
-    print(f"  Type coverage: {result['coverage']['covered_types']}/{result['coverage']['total_types']}")

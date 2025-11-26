@@ -100,13 +100,11 @@ class TemporalSequentialCountingTemplate(
             return None
         
         # Step 5: Generate question
-        audio_text = audio_segment['text'][:50]
-        if len(audio_segment['text']) > 50:
-            audio_text += "..."
-        
+        audio_text = self.get_audio_quote_for_question(audio_segment, max_length=60)
+
         question = (
             f'How many {item_descriptor}s appear after {event_a_desc} '
-            f'and someone says "{audio_text}"?'
+            f'and the audio cue "{audio_text}" is heard?'
         )
         
         answer = (
@@ -235,16 +233,14 @@ class TemporalSequentialNeedleTemplate(
             return None
         
         # Generate question
-        audio_text = audio_segment['text'][:50]
-        if len(audio_segment['text']) > 50:
-            audio_text += "..."
-        
+        audio_text = self.get_audio_quote_for_question(audio_segment, max_length=60)
+
         event_desc = self._get_event_descriptor(preceding_event, evidence)
         if not event_desc:
             return None
-        
+
         question = (
-            f'What prompts someone to say "{audio_text}"?'
+            f'What visual event prompts the audio cue "{audio_text}"?'
         )
         
         answer = (
@@ -362,14 +358,12 @@ class TemporalSequentialInferenceTemplate(
         if not audio_segment:
             return None
         
-        audio_text = audio_segment['text'][:50]
-        if len(audio_segment['text']) > 50:
-            audio_text += "..."
-        
+        audio_text = self.get_audio_quote_for_question(audio_segment, max_length=60)
+
         # Generate question (asks WHY)
         question = (
             f'Why does {event_b_desc} happen after {event_a_desc} '
-            f'and someone says "{audio_text}"?'
+            f'and the audio cue "{audio_text}" is heard?'
         )
         
         answer = (
@@ -484,17 +478,15 @@ class SubsceneNeedleTemplate(
         if not audio_segment:
             return None
         
-        audio_text = audio_segment['text'][:60]
-        if len(audio_segment['text']) > 60:
-            audio_text += "..."
-        
+        audio_text = self.get_audio_quote_for_question(audio_segment, max_length=70)
+
         # Generate question
         question = (
-            f'What does someone say when {marker} is shown on screen?'
+            f'What audio is heard when {marker} is shown on screen?'
         )
-        
+
         answer = (
-            f'When {marker} is shown, someone says "{audio_text}".'
+            f'When {marker} is shown, the audio cue "{audio_text}" is heard.'
         )
         
         # Create cues
@@ -611,17 +603,15 @@ class HolisticInferenceTemplate(
         if not audio_segment:
             return None
         
-        audio_text = audio_segment['text'][:60]
-        if len(audio_segment['text']) > 60:
-            audio_text += "..."
-        
+        audio_text = self.get_audio_quote_for_question(audio_segment, max_length=70)
+
         # Generate question (asks WHY - inference)
         if pattern_type == "rapid_cuts":
             question = (
                 f'What is the purpose of the rapid scene changes while '
-                f'someone says "{audio_text}"?'
+                f'the audio cue "{audio_text}" is heard?'
             )
-            
+
             answer = (
                 'The rapid scene changes create a montage effect that '
                 'compresses time and shows multiple related events.'
@@ -629,7 +619,7 @@ class HolisticInferenceTemplate(
         else:
             question = (
                 f'What is the purpose of this editing pattern while '
-                f'someone says "{audio_text}"?'
+                f'the audio cue "{audio_text}" is heard?'
             )
             answer = 'The editing pattern serves a narrative purpose in the video.'
         
@@ -747,13 +737,11 @@ class ContextInferenceCountingTemplate(
         # Count cues
         cue_count = len(context_elements) + 1  # +1 for audio
         
-        audio_text = audio_segment['text'][:50]
-        if len(audio_segment['text']) > 50:
-            audio_text += "..."
-        
+        audio_text = self.get_audio_quote_for_question(audio_segment, max_length=60)
+
         # Generate question
         question = (
-            f'Between the time someone says "{audio_text}" and the next few seconds, '
+            f'Between the time the audio cue "{audio_text}" is heard and the next few seconds, '
             f'how many audio or visual cues are present?'
         )
         
@@ -866,14 +854,12 @@ class SequentialObjectInteractionTemplate(
         if not audio_segment:
             return None
         
-        audio_text = audio_segment['text'][:50]
-        if len(audio_segment['text']) > 50:
-            audio_text += "..."
-        
+        audio_text = self.get_audio_quote_for_question(audio_segment, max_length=60)
+
         # Generate question
         question = (
-            f'How does the {obj_class} change after someone says "{audio_text}" '
-            f'and performs an action?'
+            f'How does the {obj_class} change after the audio cue "{audio_text}" '
+            f'and an action is performed?'
         )
         
         answer = (
@@ -986,18 +972,16 @@ class SpuriousContextTemplate(
         )
         obj_desc = DescriptorGenerator.generate_object_descriptor(visual_evidence)
         
-        audio_text = audio['text'][:80]
-        if len(audio['text']) > 80:
-            audio_text += "..."
-        
+        audio_text = self.get_audio_quote_for_question(audio, max_length=80)
+
         # Generate question
         question = (
-            f'When someone says "{audio_text}", what are they referring to '
-            f'based on what is shown on screen?'
+            f'When the audio cue "{audio_text}" is heard, what visual element '
+            f'is being referenced based on what is shown on screen?'
         )
-        
+
         answer = (
-            f'They are referring to the {obj_desc} that is shown on screen '
+            f'The audio cue is referring to the {obj_desc} that is shown on screen '
             f'at this moment.'
         )
         
@@ -1115,15 +1099,13 @@ class ReferentialSpuriousTemplate(
         if not visual:
             return None
         
-        audio_text = audio_segment['text'][:60]
-        if len(audio_segment['text']) > 60:
-            audio_text += "..."
-        
+        audio_text = self.get_audio_quote_for_question(audio_segment, max_length=70)
+
         action_desc = action['action']
-        
+
         # Generate question
         question = (
-            f'What happens when someone says "{audio_text}" and performs the action of {action_desc}?'
+            f'What happens when the audio cue "{audio_text}" is heard and the action of {action_desc} is performed?'
         )
         
         answer = (
@@ -1225,13 +1207,11 @@ class AudioVisualStitchingReferentialTemplate(
         
         audio, scene_changes = transition_result
         
-        audio_text = audio['text'][:60]
-        if len(audio['text']) > 60:
-            audio_text += "..."
-        
+        audio_text = self.get_audio_quote_for_question(audio, max_length=70)
+
         # Generate question
         question = (
-            f'When someone says "{audio_text}", does the scene change '
+            f'When the audio cue "{audio_text}" is heard, does the scene change '
             f'or remain continuous?'
         )
         
@@ -1345,24 +1325,22 @@ class SequentialSubsceneHolisticTemplate(
         if not audio_segment:
             return None
         
-        audio_text = audio_segment['text'][:50]
-        if len(audio_segment['text']) > 50:
-            audio_text += "..."
-        
+        audio_text = self.get_audio_quote_for_question(audio_segment, max_length=60)
+
         # Get event descriptors
         event_descs = []
         for event in events[:3]:
             desc = self._get_event_descriptor(event, evidence)
             if desc:
                 event_descs.append(desc)
-        
+
         if len(event_descs) < 2:
             return None
-        
+
         # Generate question
         question = (
             f'What is the sequence of events when {marker} is shown '
-            f'and someone says "{audio_text}", and why does this pattern occur?'
+            f'and the audio cue "{audio_text}" is heard, and why does this pattern occur?'
         )
         
         answer = (

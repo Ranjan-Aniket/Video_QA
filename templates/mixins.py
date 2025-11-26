@@ -60,10 +60,10 @@ class TemporalMixin:
     ) -> str:
         """
         Format question with temporal marker
-        
+
         GUIDELINE: "after X was said" (not "when X is said" if after visual)
         """
-        return f'{base_question} {temporal_relation} someone says "{audio_cue}"?'
+        return f'{base_question} {temporal_relation} the audio cue "{audio_cue}" is heard?'
 
 
 class SequentialMixin:
@@ -229,9 +229,9 @@ class NeedleMixin:
     ) -> str:
         """Format needle question"""
         if detail_type == "text":
-            return f'What text appears on the {location} when someone says "{audio_cue}"?'
+            return f'What text appears on the {location} when the audio cue "{audio_cue}" is heard?'
         else:
-            return f'What {detail_type} appears when someone says "{audio_cue}"?'
+            return f'What {detail_type} appears when the audio cue "{audio_cue}" is heard?'
 
 
 class ReferentialGroundingMixin:
@@ -284,11 +284,11 @@ class ReferentialGroundingMixin:
     ) -> str:
         """Format referential grounding question"""
         if connection_type == "people_present":
-            return f'Who is visible on screen when someone says "{audio_cue}"?'
+            return f'Which people are visible on screen when the audio cue "{audio_cue}" is heard?'
         elif connection_type == "sound_source":
-            return f'What creates the sound when someone says "{audio_cue}"?'
+            return f'What creates the sound when the audio cue "{audio_cue}" is heard?'
         else:
-            return f'What is shown when someone says "{audio_cue}"?'
+            return f'What is shown when the audio cue "{audio_cue}" is heard?'
 
 
 class ContextMixin:
@@ -324,7 +324,7 @@ class ContextMixin:
         element_type: str = "background"
     ) -> str:
         """Format context question"""
-        return f'What visual elements are present in the {element_type} when someone says "{audio_cue}"?'
+        return f'What visual elements are present in the {element_type} when the audio cue "{audio_cue}" is heard?'
 
 
 class ComparativeMixin:
@@ -385,7 +385,7 @@ class ComparativeMixin:
         comparison_aspect: str
     ) -> str:
         """Format comparative question"""
-        return f'What is the difference in the person\'s {comparison_aspect} before and after someone says "{audio_cue}"?'
+        return f'What is the difference in the person\'s {comparison_aspect} before and after the audio cue "{audio_cue}" is heard?'
 
 
 class InferenceMixin:
@@ -426,7 +426,7 @@ class InferenceMixin:
         audio_cue: str
     ) -> str:
         """Format inference question (asks "why")"""
-        return f'Why does {event_descriptor} happen after someone says "{audio_cue}"?'
+        return f'Why does {event_descriptor} happen after the audio cue "{audio_cue}" is heard?'
 
 
 class ObjectInteractionMixin:
@@ -479,7 +479,7 @@ class ObjectInteractionMixin:
         audio_cue: str
     ) -> str:
         """Format object interaction question"""
-        return f'How does the {object_class} change after someone says "{audio_cue}" and performs an action?'
+        return f'How does the {object_class} change after the audio cue "{audio_cue}" and an action is performed?'
 
 
 class SubsceneMixin:
@@ -524,7 +524,7 @@ class SubsceneMixin:
         audio_cue: str
     ) -> str:
         """Format subscene question"""
-        return f'Describe what happens when {marker} is shown and someone says "{audio_cue}"?'
+        return f'Describe what happens when {marker} is shown and the audio cue "{audio_cue}" is heard?'
 
 
 class HolisticReasoningMixin:
@@ -563,7 +563,7 @@ class HolisticReasoningMixin:
     ) -> str:
         """Format holistic reasoning question"""
         if pattern_type == "rapid_cuts":
-            return f'What is the purpose of the rapid scene changes while someone says "{audio_cue}"?'
+            return f'What is the purpose of the rapid scene changes while the audio cue "{audio_cue}" is heard?'
         else:
             return f'What is the purpose of this pattern in the video?'
 
@@ -603,7 +603,7 @@ class AudioVisualStitchingMixin:
         audio_cue: str
     ) -> str:
         """Format audio-visual stitching question"""
-        return f'When someone says "{audio_cue}", does the scene change or remain continuous?'
+        return f'When the audio cue "{audio_cue}" is heard, does the scene change or remain continuous?'
 
 
 class SpuriousCorrelationMixin:
@@ -650,7 +650,7 @@ class SpuriousCorrelationMixin:
         audio_cue: str
     ) -> str:
         """Format spurious correlation question"""
-        return f'When someone says "{audio_cue}", what are they referring to based on what is shown on screen?'
+        return f'When the audio cue "{audio_cue}" is heard, what visual element is being referenced based on what is shown on screen?'
 
 
 # Helper methods that all mixins share

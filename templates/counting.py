@@ -118,14 +118,12 @@ class CountingTemplate(QuestionTemplate):
         )
         object_descriptor = DescriptorGenerator.generate_object_descriptor(visual_evidence)
         
-        # Get audio cue text (first 50 chars)
-        audio_text = audio_segment['text'][:50]
-        if len(audio_segment['text']) > 50:
-            audio_text += "..."
-        
+        # Get audio cue text (no truncation per guideline 12)
+        audio_text = self.get_audio_quote_for_question(audio_segment, max_length=60)
+
         # Generate question
         question = (
-            f'How many {object_descriptor}s appear on screen after someone says '
+            f'How many {object_descriptor}s appear on screen after the audio cue '
             f'"{audio_text}"?'
         )
         
@@ -225,15 +223,14 @@ class CountingTemplate(QuestionTemplate):
             # Skip intro/outro
             if self.is_in_intro_outro(audio_segment['start'], evidence):
                 continue
-            
-            audio_text = audio_segment['text'][:50]
-            if len(audio_segment['text']) > 50:
-                audio_text += "..."
-            
+
+            # Get audio text (no truncation per guideline 12)
+            audio_text = self.get_audio_quote_for_question(audio_segment, max_length=60)
+
             # Generate question
             question = (
                 f'How many times does the {person_descriptor} perform the action of '
-                f'{action_type} after someone says "{audio_text}"?'
+                f'{action_type} after the audio cue "{audio_text}"?'
             )
             
             # Count actions after audio

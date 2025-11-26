@@ -356,6 +356,10 @@ class SmartFrameExtractorEnhanced:
         dense_clusters = selection_plan.get('dense_clusters', [])
         logger.info(f"\n📍 Step 2: Extracting {len(dense_clusters)} dense clusters...")
 
+        # ✅ VALIDATION #5: Ensure we have cluster metadata
+        if not dense_clusters:
+            logger.info("   No dense clusters to extract")
+
         cluster_frame_count = 0
         for cluster_idx, cluster in enumerate(dense_clusters):
             start_time = cluster['start']
@@ -363,19 +367,40 @@ class SmartFrameExtractorEnhanced:
             frame_count = cluster['frame_count']
             reason = cluster.get('reason', 'Dense activity region')
 
-            # Calculate interval
+            # ✅ VALIDATION #1: Skip invalid clusters
+            if frame_count < 2:
+                logger.warning(f"   ✗ Skipping cluster {cluster_idx+1}: frame_count={frame_count} (need 2+ frames)")
+                continue
+            
+            if start_time < 0 or end_time > self.duration:
+                logger.warning(f"   ✗ Skipping cluster {cluster_idx+1}: out of bounds ({start_time:.1f}s-{end_time:.1f}s, video={self.duration:.1f}s)")
+                continue
+            
+            if end_time <= start_time:
+                logger.warning(f"   ✗ Skipping cluster {cluster_idx+1}: invalid range ({start_time:.1f}s-{end_time:.1f}s)")
+                continue
+
+            # Calculate interval (evenly-spaced frames)
             duration = end_time - start_time
-            interval = duration / max(frame_count - 1, 1) if frame_count > 1 else 0
+            interval = duration / (frame_count - 1) if frame_count > 1 else 0
 
             cluster_id = f"cluster_{cluster_idx:02d}"
 
             logger.info(f"   Cluster {cluster_idx+1}: {frame_count} frames from {start_time:.1f}s to {end_time:.1f}s")
 
+            # ✅ VALIDATION #2: Generate frame timestamps with exact start/end boundaries
             for i in range(frame_count):
-                timestamp = start_time + (i * interval)
+                # Use exact start/end for first and last frames (avoid floating point drift)
+                if i == 0:
+                    timestamp = start_time
+                elif i == frame_count - 1:
+                    timestamp = end_time
+                else:
+                    timestamp = start_time + (i * interval)
 
-                # Skip if out of bounds
+                # Skip if out of bounds (defensive check)
                 if timestamp < 0 or timestamp > self.duration:
+                    logger.warning(f"   ✗ Skipping frame {i+1}/{frame_count}: timestamp {timestamp:.1f}s out of bounds")
                     continue
 
                 frame_id = f"{cluster_id}_frame_{i:02d}"
@@ -400,6 +425,15 @@ class SmartFrameExtractorEnhanced:
                     cluster_frame_count += 1
 
         logger.info(f"   ✓ Extracted {cluster_frame_count} cluster frames")
+        
+        # ✅ VALIDATION #3: Log cluster frame distribution
+        cluster_distribution = {}
+        for f in extracted_frames:
+            if f.cluster_id:
+                cluster_distribution[f.cluster_id] = cluster_distribution.get(f.cluster_id, 0) + 1
+        
+        if cluster_distribution:
+            logger.info(f"   Cluster breakdown: {dict(cluster_distribution)}")
 
         # Summary
         total = len(extracted_frames)
@@ -432,30 +466,53 @@ class SmartFrameExtractorEnhanced:
         cluster_id: Optional[str] = None,
         cluster_position: Optional[int] = None
     ) -> Optional[ExtractedFrame]:
-        """Extract single frame with all metadata"""
+        """
+        Extract single frame with all metadata.
+
+        ✅ FIX: Uses timestamp-based seeking (CAP_PROP_POS_MSEC) instead of frame numbers
+               to avoid rounding errors at non-integer FPS (23.976, 29.97, etc.)
+        """
         cap = cv2.VideoCapture(str(self.video_path))
-        
+
         if not cap.isOpened():
             logger.error(f"Cannot open video")
             return None
-        
-        frame_number = int(timestamp * self.fps)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+
+        # ✅ PRIMARY: Use millisecond-based seeking (more precise than frame numbers)
+        cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000.0)
         ret, frame_img = cap.read()
+
+        # ✅ FALLBACK: If timestamp seek failed, try frame number
+        if not ret:
+            frame_number = int(timestamp * self.fps)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+            ret, frame_img = cap.read()
+
+        # ✅ VERIFICATION: Get actual timestamp and frame number from video
+        actual_timestamp = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+        actual_frame_number = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+
         cap.release()
-        
+
         if not ret:
             logger.warning(f"Failed to extract frame at {timestamp:.1f}s")
             return None
-        
+
+        # ✅ DRIFT WARNING: Log significant drift only (>500ms)
+        timestamp_drift = abs(actual_timestamp - timestamp)
+        if timestamp_drift > 0.5:  # 500ms threshold - significant drift
+            logger.warning(f"SIGNIFICANT timestamp drift for {frame_id}: requested {timestamp:.3f}s, got {actual_timestamp:.3f}s (drift: {timestamp_drift:.3f}s)")
+        elif timestamp_drift > 0.1:  # 100-500ms - minor drift (debug only)
+            logger.debug(f"Minor timestamp drift for {frame_id}: {timestamp_drift:.3f}s")
+
         # Save frame
         frame_filename = f"{frame_id}_{timestamp:.2f}s.jpg"
         frame_path = self.output_dir / frame_filename
         cv2.imwrite(str(frame_path), frame_img)
-        
+
         return ExtractedFrame(
             frame_id=frame_id,
-            timestamp=timestamp,
+            timestamp=actual_timestamp,  # ✅ USE ACTUAL timestamp (not requested)
             frame_type=frame_type,
             priority=priority,
             image_path=str(frame_path),
@@ -470,13 +527,23 @@ class SmartFrameExtractorEnhanced:
             cluster_position=cluster_position,
             width=frame_img.shape[1],
             height=frame_img.shape[0],
-            frame_number=frame_number
+            frame_number=actual_frame_number  # ✅ USE ACTUAL frame number
         )
     
     def save_frame_metadata(self, frames: List[ExtractedFrame], output_path: Optional[Path] = None):
-        """Save frame metadata to JSON"""
+        """
+        Save frame metadata to JSON.
+        
+        ✅ COMPATIBILITY: Ensures Phase 8 can properly map frames to clusters.
+        """
         if output_path is None:
             output_path = self.output_dir / "frames_metadata.json"
+        
+        # ✅ VALIDATION #4: Ensure all frames have valid timestamps
+        invalid_frames = [f for f in frames if f.timestamp < 0 or f.timestamp > self.duration]
+        if invalid_frames:
+            logger.warning(f"Found {len(invalid_frames)} frames with invalid timestamps, excluding from metadata")
+            frames = [f for f in frames if f.timestamp >= 0 and f.timestamp <= self.duration]
         
         frames_data = []
         for frame in frames:

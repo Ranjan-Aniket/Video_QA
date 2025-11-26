@@ -49,3 +49,44 @@ Thumbs.db
 .env
 *.key
 credentials.json
+
+# Modal
+.modal/
+modal_deployment/
+modal_deployment.zip
+
+# Temporary deployment files
+deploy_*.sh
+submit_to_modal.sh
+call_modal_api.py
+deploy_via_python.py
+deploy_programmatic.py
+docker_deploy.sh
+
+# Excel files
+*.xlsx
+
+# Test files
+test_*.py
+test_*.sh
+analyze_*.py
+analyze_*.sh
+check_*.py
+reset_*.sh
+run_*.py
+
+# Videos
+*.mp4
+*.avi
+*.mov
+videos.txt
+
+# Documentation (optional - remove if you want to commit docs)
+*_GUIDE.md
+*_OPTIONS.md
+*_INSTRUCTIONS.md
+*_WORKFLOW.md
+DEPLOY_*.md
+MODAL_*.md
+WEB_UI_*.md
+PIPELINE_FILES_LIST.txt

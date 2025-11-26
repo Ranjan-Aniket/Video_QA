@@ -376,25 +376,73 @@ class QuestionTemplate(ABC):
     ) -> Optional[Dict]:
         """
         Find audio segment near timestamp
-        
+
         Args:
             timestamp: Target timestamp
             evidence: Evidence database
             max_distance: Maximum distance in seconds
-            
+
         Returns:
             Closest audio segment or None
         """
         closest = None
         min_dist = float('inf')
-        
+
         for segment in evidence.transcript_segments:
             dist = abs(segment['start'] - timestamp)
             if dist < min_dist and dist <= max_distance:
                 min_dist = dist
                 closest = segment
-        
+
         return closest
+
+    def get_audio_quote_for_question(
+        self,
+        audio_segment: Dict,
+        max_length: int = 80
+    ) -> str:
+        """
+        Get properly formatted audio quote for question
+
+        Per guideline 12: Must transcribe EXACTLY - no truncation with "..."
+        If quote is too long, we use a different question pattern instead
+
+        Args:
+            audio_segment: Audio segment dict with 'text' field
+            max_length: Maximum length for direct quotes
+
+        Returns:
+            Audio text for use in question (no truncation markers)
+        """
+        text = audio_segment['text'].strip()
+
+        # If short enough, use exact quote
+        if len(text) <= max_length:
+            return text
+
+        # If too long, return first sentence or clause
+        # Look for sentence break
+        sentences = re.split(r'[.!?]', text)
+        if sentences and len(sentences[0]) <= max_length:
+            return sentences[0].strip()
+
+        # Look for comma break
+        clauses = text.split(',')
+        if clauses and len(clauses[0]) <= max_length:
+            return clauses[0].strip()
+
+        # Last resort: use first max_length chars at word boundary
+        # But DON'T add "..." - guidelines forbid truncation
+        words = text.split()
+        result = []
+        length = 0
+        for word in words:
+            if length + len(word) + 1 > max_length:
+                break
+            result.append(word)
+            length += len(word) + 1
+
+        return ' '.join(result) if result else text[:max_length]
     
     def find_visual_near_timestamp(
         self,
