@@ -243,12 +243,9 @@ class QuickVisualSampler:
         # 4. YOLO: Detect objects (JIT)
         object_result = self.yolo.detect_objects_jit(frame, timestamp)
 
-        # 5. OCR: Extract text (JIT) - OPTIMIZED: Run only every 5th frame to save time
-        ocr_result = None
-        if frame_num % 5 == 0:  # Run OCR on every 5th frame only
-            ocr_result = self.ocr.extract_text_jit(frame, timestamp)
-        else:
-            ocr_result = {'text_blocks': [], 'block_count': 0}  # Empty result for skipped frames
+        # 5. OCR: DISABLED - Vision models (Claude/GPT-4o) will detect text in Phase 8
+        # No need for redundant OCR processing - saves 20+ minutes per video
+        ocr_result = {'text_blocks': [], 'block_count': 0}  # Skip OCR entirely
 
         # 6. Pose: Detect human poses
         pose_result = self.pose.detect_pose(frame)
