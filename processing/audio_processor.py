@@ -349,9 +349,13 @@ class AudioProcessor:
         # Fall back to local Whisper using whisper library
         try:
             import whisper
+            import torch
+
+            # Auto-detect best device
+            device = "cuda" if torch.cuda.is_available() else "cpu"
 
             # Load tiny model for speed (can upgrade to base/small later)
-            model = whisper.load_model("tiny")
+            model = whisper.load_model("tiny", device=device)
             result = model.transcribe(str(audio_path))
 
             return AudioSegment(

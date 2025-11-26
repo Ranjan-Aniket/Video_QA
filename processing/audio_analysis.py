@@ -216,9 +216,18 @@ class AudioAnalyzer:
         try:
             import whisper
 
+            # Auto-detect best device for Whisper
+            import torch
+            if torch.cuda.is_available():
+                device = "cuda"
+                logger.info(f"Using CUDA GPU: {torch.cuda.get_device_name(0)} for Whisper")
+            else:
+                device = "cpu"
+                logger.info("Using CPU for Whisper (no GPU available)")
+
             # Load Whisper model (large-v3 for best accuracy, especially for noisy audio)
             logger.info("Loading Whisper large-v3 model (this may take a moment)...")
-            model = whisper.load_model("large-v3")
+            model = whisper.load_model("large-v3", device=device)
 
             # Transcribe with word-level timestamps (required for adversarial pipeline)
             logger.info(f"Transcribing: {audio_path.name}")

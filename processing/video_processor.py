@@ -163,7 +163,10 @@ class VideoProcessor:
         try:
             # 1. Whisper for audio transcription
             import whisper
-            self.whisper_model = whisper.load_model("base")
+            # Auto-detect best device
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.whisper_model = whisper.load_model("base", device=device)
             logger.info("✓ Whisper loaded (base model)")
         except Exception as e:
             logger.warning(f"Failed to load Whisper: {e}")
