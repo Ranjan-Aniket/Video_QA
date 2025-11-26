@@ -63,7 +63,7 @@ class VideoMAEProcessor:
     def __init__(
         self,
         model_name: str = "videomae-base",
-        device: str = "cpu",
+        device: str = None,
         num_frames: int = 16  # Number of frames for temporal window
     ):
         """
@@ -71,18 +71,32 @@ class VideoMAEProcessor:
 
         Args:
             model_name: Model variant (base, large)
-            device: Device for inference (cpu/cuda)
+            device: Device for inference (cpu/cuda/mps, auto-detected if None)
             num_frames: Number of frames to sample for action recognition
         """
+        import torch
+
+        # Auto-detect best device: CUDA (NVIDIA) > MPS (Apple Silicon) > CPU
+        if device:
+            self.device = device
+        elif torch.cuda.is_available():
+            self.device = "cuda"
+            logger.info(f"Using CUDA GPU: {torch.cuda.get_device_name(0)}")
+        elif torch.backends.mps.is_available():
+            self.device = "mps"
+            logger.info("Using Apple Silicon MPS")
+        else:
+            self.device = "cpu"
+            logger.warning("No GPU available, using CPU (will be slow)")
+
         self.model_name = model_name
-        self.device = device
         self.num_frames = num_frames
         self.model = None
         self.actions = self.ACTIONS
 
         self._init_model()
 
-        logger.info(f"VideoMAE Processor initialized (model: {model_name}, device: {device})")
+        logger.info(f"VideoMAE Processor initialized (model: {model_name}, device: {self.device})")
 
     def _init_model(self):
         """Initialize VideoMAE model"""

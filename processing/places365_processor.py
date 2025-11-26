@@ -68,23 +68,37 @@ class Places365Processor:
     def __init__(
         self,
         model_name: str = "resnet152",
-        device: str = "cpu"
+        device: str = None
     ):
         """
         Initialize Places365 processor
 
         Args:
             model_name: Model architecture (resnet152)
-            device: Device for inference (cpu/cuda)
+            device: Device for inference (cpu/cuda/mps, auto-detected if None)
         """
+        import torch
+
+        # Auto-detect best device: CUDA (NVIDIA) > MPS (Apple Silicon) > CPU
+        if device:
+            self.device = device
+        elif torch.cuda.is_available():
+            self.device = "cuda"
+            logger.info(f"Using CUDA GPU: {torch.cuda.get_device_name(0)}")
+        elif torch.backends.mps.is_available():
+            self.device = "mps"
+            logger.info("Using Apple Silicon MPS")
+        else:
+            self.device = "cpu"
+            logger.warning("No GPU available, using CPU (will be slow)")
+
         self.model_name = model_name
-        self.device = device
         self.model = None
         self.categories = self.CATEGORIES
 
         self._init_model()
 
-        logger.info(f"Places365 Processor initialized (model: {model_name}, device: {device})")
+        logger.info(f"Places365 Processor initialized (model: {model_name}, device: {self.device})")
 
     def _init_model(self):
         """Initialize Places365-ResNet152 model"""
