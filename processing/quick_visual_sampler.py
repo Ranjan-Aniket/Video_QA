@@ -266,7 +266,7 @@ class QuickVisualSampler:
             'clip_embedding': clip_embedding.tolist() if clip_embedding is not None else [],
             'scene_type': scene_result.scene_category,
             'objects': [obj.to_dict() for obj in object_result.detections],
-            'text_detected': ocr_result.all_text,
+            'text_detected': ocr_result.get('all_text', '') if isinstance(ocr_result, dict) else ocr_result.all_text,
             'poses': pose_result.to_dict() if pose_result else {},
             'emotions': emotions,
             'quality': quality
