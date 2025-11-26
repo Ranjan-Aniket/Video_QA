@@ -88,7 +88,19 @@ class CLIPAnalyzer:
             use_siglip: Use SigLIP instead of CLIP (better text-image alignment)
             device: torch device (cpu, cuda, mps)
         """
-        self.device = device or ("mps" if torch.backends.mps.is_available() else "cpu")
+        # Auto-detect best device: CUDA (NVIDIA) > MPS (Apple Silicon) > CPU
+        if device:
+            self.device = device
+        elif torch.cuda.is_available():
+            self.device = "cuda"
+            logger.info(f"Using CUDA GPU: {torch.cuda.get_device_name(0)}")
+        elif torch.backends.mps.is_available():
+            self.device = "mps"
+            logger.info("Using Apple Silicon MPS")
+        else:
+            self.device = "cpu"
+            logger.warning("No GPU available, using CPU (will be slow)")
+
         self.model_name = model_name
         self.use_siglip = use_siglip
 
