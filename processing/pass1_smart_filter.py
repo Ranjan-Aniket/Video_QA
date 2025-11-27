@@ -378,7 +378,7 @@ CONSTRAINTS:
 - Prioritize diversity of ontology types
 
 OUTPUT FORMAT:
-Return a JSON array of selected frame IDs with reasons:
+Return ONLY a JSON array of selected frame IDs with reasons. Do NOT wrap in markdown code blocks.
 
 [
   {{
@@ -390,7 +390,11 @@ Return a JSON array of selected frame IDs with reasons:
   ...
 ]
 
-Select UP TO {budget} frames. Focus on quality over quantity - it's okay to select fewer than {budget} if candidates are weak.
+IMPORTANT:
+- Return ONLY the JSON array, no explanatory text before or after
+- Do NOT use markdown code blocks (no ``` markers)
+- Select UP TO {budget} frames
+- Focus on quality over quantity - it's okay to select fewer than {budget} if candidates are weak
 """
 
         return prompt
@@ -411,14 +415,34 @@ Select UP TO {budget} frames. Focus on quality over quantity - it's okay to sele
             Set of selected frame IDs
         """
         try:
-            # Extract JSON from response
+            # Extract JSON from response with multiple strategies
             import re
-            json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
-            if not json_match:
-                logger.warning("No JSON array found in LLM response")
-                return set()
 
-            selections = json.loads(json_match.group(0))
+            # Strategy 1: Extract from markdown code blocks
+            code_block_match = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', response_text, re.DOTALL)
+            if code_block_match:
+                json_str = code_block_match.group(1)
+            else:
+                # Strategy 2: Find JSON array (non-greedy)
+                json_match = re.search(r'\[\s*\{.*?\}\s*\]', response_text, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(0)
+                else:
+                    # Strategy 3: Find any array (greedy, last resort)
+                    json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+                    if json_match:
+                        json_str = json_match.group(0)
+                    else:
+                        logger.warning("No JSON array found in LLM response")
+                        logger.debug(f"Response text (first 500 chars): {response_text[:500]}")
+                        return set()
+
+            # Parse JSON
+            selections = json.loads(json_str)
+
+            if not isinstance(selections, list):
+                logger.warning(f"Expected list, got {type(selections)}")
+                return set()
 
             # Extract frame IDs
             selected_ids = set()
@@ -433,10 +457,19 @@ Select UP TO {budget} frames. Focus on quality over quantity - it's okay to sele
             valid_ids = {f['frame_id'] for f in candidate_frames if f.get('frame_id') is not None}
             selected_ids = selected_ids & valid_ids
 
+            if not selected_ids:
+                logger.warning("No valid frame IDs extracted from LLM response")
+                logger.debug(f"Parsed {len(selections)} items, none matched candidate frames")
+
             return selected_ids
 
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON from LLM response: {e}")
+            logger.debug(f"Response text (first 500 chars): {response_text[:500]}")
+            return set()
         except Exception as e:
             logger.error(f"Failed to parse LLM response: {e}")
+            logger.debug(f"Response text (first 500 chars): {response_text[:500]}")
             return set()
 
     def _fallback_selection(
