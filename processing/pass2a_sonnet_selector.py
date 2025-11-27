@@ -919,19 +919,22 @@ Total frames in this batch: {len(frames)}
             #         rejection_reason = f"Temporal window: {reason}"
             #         validation_stats['temporal_window'] += 1
 
-            # ✅ Validation #3: Mode duration (CHEAP - simple math)
-            if rejection_reason is None:
-                is_valid, reason = self.validate_moment_duration(moment)
-                if not is_valid:
-                    rejection_reason = f"Mode duration: {reason}"
-                    validation_stats['mode_duration'] += 1
+            # ❌ REMOVED: Mode duration validation (not in official guidelines)
+            # Duration ranges are internal conventions, not PDF requirements
+            # if rejection_reason is None:
+            #     is_valid, reason = self.validate_moment_duration(moment)
+            #     if not is_valid:
+            #         rejection_reason = f"Mode duration: {reason}"
+            #         validation_stats['mode_duration'] += 1
 
-            # ✅ Validation #4: Cue quality (MEDIUM - regex pattern matching)
-            if rejection_reason is None:
-                is_valid, issues = self.validate_cue_quality(moment)
-                if not is_valid:
-                    rejection_reason = f"Cue quality: {'; '.join(issues[:2])}"  # Show first 2 issues
-                    validation_stats['cue_quality'] += 1
+            # ❌ REMOVED: Cue quality validation (pronouns/hedging fixed in Pass 3)
+            # HedgingFixer in Pass 3 handles pronoun replacement and hedging removal
+            # Rejecting here prevents moments from reaching the fixer
+            # if rejection_reason is None:
+            #     is_valid, issues = self.validate_cue_quality(moment)
+            #     if not is_valid:
+            #         rejection_reason = f"Cue quality: {'; '.join(issues[:2])}"  # Show first 2 issues
+            #         validation_stats['cue_quality'] += 1
 
             # ✅ Validation #5: Protected radius (MEDIUM - math calculation)
             if rejection_reason is None:
