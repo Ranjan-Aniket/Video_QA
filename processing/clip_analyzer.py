@@ -273,28 +273,40 @@ class CLIPAnalyzer:
     def analyze_frames(
         self,
         frames: List[Dict],
-        video_path: str,
+        video_path: str = None,  # No longer needed - frames already saved to disk
         batch_size: int = 32
-    ) -> List[FrameEmbedding]:
+    ) -> List[Dict]:
         """
-        Generate embeddings for all frames with batching
+        Complete vision analysis for all frames with batching.
+
+        Runs ALL vision models in batch:
+        - CLIP embeddings
+        - YOLO object detection
+        - MediaPipe pose detection
+        - Places365 scene classification
+        - Quality assessment
 
         Args:
-            frames: List of frame metadata dicts
-            video_path: Path to video file
+            frames: List of frame metadata dicts (from Phase 2 with frame_path)
+            video_path: DEPRECATED - not used (frames read from disk)
             batch_size: Number of frames to process in each batch
 
         Returns:
-            List of FrameEmbedding objects
+            List of frame analysis dicts with all vision model outputs
         """
-        logger.info(f"Generating CLIP embeddings for {len(frames)} frames (batch_size={batch_size})...")
+        logger.info(f"🎨 Running complete vision analysis for {len(frames)} frames (batch_size={batch_size})...")
+        logger.info(f"   Models: CLIP, YOLO, MediaPipe, Places365, Quality")
 
-        frame_embeddings = []
-        cap = cv2.VideoCapture(video_path)
+        # Load vision models
+        from .object_detector import ObjectDetector
+        from .pose_detector import PoseDetector
+        from .places365_processor import Places365Processor
 
-        if not cap.isOpened():
-            logger.error(f"Failed to open video file: {video_path}")
-            return frame_embeddings
+        yolo = ObjectDetector(device=self.device)
+        pose_detector = PoseDetector()
+        places365 = Places365Processor()
+
+        frame_analyses = []
 
         # Process in batches
         for batch_idx in range(0, len(frames), batch_size):
@@ -302,56 +314,66 @@ class CLIPAnalyzer:
             batch_images = []
             batch_metadata = []
 
-            # Read frames in batch
+            # Read frames from disk (saved by Phase 2)
             for frame_meta in batch:
-                frame_id = frame_meta.get('frame_id', frame_meta.get('frame_number', 0))
-                timestamp = frame_meta.get('timestamp', 0)
+                frame_path = frame_meta.get('frame_path')
+                if not frame_path or not Path(frame_path).exists():
+                    logger.warning(f"Frame not found: {frame_path}")
+                    continue
 
                 try:
-                    # Seek to frame
-                    cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
-                    ret, frame = cap.read()
-
-                    if not ret:
-                        logger.warning(f"Failed to read frame at {timestamp}s")
-                        continue
-
-                    # Validate frame is not empty
-                    if frame is None or frame.size == 0:
-                        logger.warning(f"Empty frame at {timestamp}s")
+                    # Read frame from disk
+                    frame = cv2.imread(str(frame_path))
+                    if frame is None:
+                        logger.warning(f"Failed to read frame: {frame_path}")
                         continue
 
                     batch_images.append(frame)
-                    batch_metadata.append({
-                        'frame_id': frame_id,
-                        'timestamp': timestamp,
-                        'scene_type': frame_meta.get('scene_type'),
-                        'has_ocr': bool(frame_meta.get('ocr_text')),
-                        'object_count': len(frame_meta.get('objects', []))
-                    })
+                    batch_metadata.append(frame_meta)
                 except Exception as e:
-                    logger.warning(f"Error reading frame {frame_id} at {timestamp}s: {e}")
+                    logger.warning(f"Error reading frame {frame_path}: {e}")
                     continue
 
-            # Batch encode images
+            # Batch process all vision models
             if batch_images:
                 try:
-                    embeddings = self._encode_image_batch(batch_images)
+                    # 1. CLIP embeddings (batch)
+                    clip_embeddings = self.encode_images_batch(batch_images)
 
-                    # Create FrameEmbedding objects
-                    for meta, embedding in zip(batch_metadata, embeddings):
-                        frame_emb = FrameEmbedding(
-                            frame_id=meta['frame_id'],
-                            timestamp=meta['timestamp'],
-                            embedding=embedding,
-                            scene_type=meta['scene_type'],
-                            has_ocr=meta['has_ocr'],
-                            object_count=meta['object_count']
-                        )
-                        frame_embeddings.append(frame_emb)
+                    # 2. Process each frame with other models
+                    for i, (frame, meta) in enumerate(zip(batch_images, batch_metadata)):
+                        # YOLO object detection
+                        objects = yolo.detect_objects_jit(frame, meta.get('timestamp', 0))
+
+                        # MediaPipe pose detection
+                        poses = pose_detector.detect_pose(frame)
+
+                        # Places365 scene classification
+                        scene = places365.classify_scene(frame)
+
+                        # Quality assessment
+                        quality = self._assess_frame_quality(frame)
+
+                        # Combine all results
+                        frame_analyses.append({
+                            'frame_id': meta.get('frame_id'),
+                            'frame_path': meta.get('frame_path'),
+                            'timestamp': meta.get('timestamp'),
+                            'quality': quality,
+                            # CLIP
+                            'clip_embedding': clip_embeddings[i].tolist(),
+                            # YOLO
+                            'objects': [obj.to_dict() for obj in objects.detections],
+                            'object_count': len(objects.detections),
+                            # MediaPipe
+                            'poses': poses.to_dict() if poses else {},
+                            # Places365
+                            'scene_type': scene.scene_category,
+                            'scene_attributes': scene.attributes if hasattr(scene, 'attributes') else []
+                        })
+
                 except Exception as e:
-                    logger.error(f"Error encoding batch at index {batch_idx}: {e}")
-                    # Continue to next batch instead of failing completely
+                    logger.error(f"Error processing batch at index {batch_idx}: {e}")
                     continue
 
             # Progress logging
@@ -362,10 +384,30 @@ class CLIPAnalyzer:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-        cap.release()
-        logger.info(f"Generated {len(frame_embeddings)} frame embeddings")
+        logger.info(f"✅ Completed vision analysis for {len(frame_analyses)} frames")
 
-        return frame_embeddings
+        return frame_analyses
+
+    def _assess_frame_quality(self, frame) -> float:
+        """Quick quality assessment"""
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # Blur score
+        blur_score = cv2.Laplacian(gray, cv2.CV_64F).var()
+
+        # Brightness
+        brightness = np.mean(gray) / 255.0
+
+        # Quality score (0-1)
+        blur_ok = blur_score > 100
+        brightness_ok = 0.1 < brightness < 0.9
+
+        if blur_ok and brightness_ok:
+            return 1.0
+        elif blur_ok or brightness_ok:
+            return 0.5
+        else:
+            return 0.0
 
     def _encode_image_batch(self, images: List[np.ndarray]) -> List[np.ndarray]:
         """

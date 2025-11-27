@@ -1,17 +1,12 @@
 """
-Quick Visual Sampler - Phase 2: Sample frames + Run FREE models
+Quick Visual Sampler - Phase 2: Extract frames ONLY
 
-Samples 1 frame per scene (~50-100 frames) and runs ALL FREE models:
-- BLIP-2 (captions)
-- CLIP (embeddings)
-- Places365 (scene classification)
-- YOLO (object detection)
-- OCR (text extraction)
-- Pose (human poses)
-- FER (emotions)
+Fast frame extraction at 2fps with basic quality filtering.
+All vision models (CLIP, YOLO, MediaPipe, Places365) run in Phase 3.
 
-Cost: $0 (all local models)
-Output: visual_context.json with rich visual information
+Cost: $0
+Time: ~30 seconds for typical video
+Output: Frame metadata (timestamp, frame_id, frame_path, quality)
 """
 
 import cv2
@@ -29,69 +24,14 @@ class QuickVisualSampler:
 
     def __init__(self, enable_blip2: bool = False):
         """
-        Initialize sampler and load models
+        Initialize sampler (NO MODELS - just frame extraction)
 
         Args:
-            enable_blip2: Enable BLIP-2 captioning (SLOW - 90s/frame, adds 2+ hours)
+            enable_blip2: DEPRECATED - no longer used
         """
         self.enable_blip2 = enable_blip2
-        self.models_loaded = False
-        self._load_models()
-    
-    def _load_models(self):
-        """Load all FREE models"""
-        try:
-            # Import all processors
-            from .clip_analyzer import CLIPAnalyzer  # Use batch processor
-            from .places365_processor import Places365Processor
-            from .object_detector import ObjectDetector
-            from .ocr_processor import OCRProcessor
-            from .pose_detector import PoseDetector
-
-            # Auto-detect GPU availability
-            gpu_available = False
-            try:
-                import torch
-                gpu_available = torch.cuda.is_available()
-                if gpu_available:
-                    logger.info(f"✅ GPU detected: {torch.cuda.get_device_name(0)}")
-                else:
-                    logger.info("ℹ️  No GPU detected - using CPU mode")
-            except ImportError:
-                logger.info("ℹ️  PyTorch not available - using CPU mode")
-
-            device = "cuda" if gpu_available else "cpu"
-
-            # BLIP-2 is OPTIONAL (very slow - 90s per frame!)
-            if self.enable_blip2:
-                from .blip2_processor import BLIP2Processor
-                self.blip2 = BLIP2Processor()
-                logger.info("⚠️  BLIP-2 enabled - expect 2+ hours for Phase 2")
-            else:
-                self.blip2 = None
-                logger.info("✓ BLIP-2 disabled - Phase 2 will be ~5 minutes with batch processing")
-
-            # Load models with auto-detected device
-            self.clip = CLIPAnalyzer(device=device, batch_size=32)  # BATCH PROCESSING
-            self.places365 = Places365Processor()  # CPU only (no GPU support)
-            self.yolo = ObjectDetector(device=device)
-            self.ocr = OCRProcessor()  # GPU enabled in ocr_processor.py if available
-            self.pose = PoseDetector()  # MediaPipe auto-detects GPU
-            
-            # Optional: FER (if available)
-            try:
-                from .fer_processor import FERProcessor
-                self.fer = FERProcessor()
-            except:
-                self.fer = None
-                logger.warning("FER processor not available")
-            
-            self.models_loaded = True
-            logger.info("All FREE models loaded successfully")
-            
-        except Exception as e:
-            logger.error(f"Error loading models: {e}")
-            self.models_loaded = False
+        self.models_loaded = True  # No models needed anymore
+        logger.info("QuickVisualSampler initialized (frame extraction only)")
     
     def sample_and_analyze(
         self,
@@ -139,18 +79,14 @@ class QuickVisualSampler:
         skipped_count = 0
 
         if mode == "fps":
-            # FPS Mode: Extract frames at uniform FPS rate (with BATCH CLIP processing)
-            logger.info(f"Sampling at {fps_rate} FPS with FREE models (BATCH PROCESSING)...")
+            # FPS Mode: Extract frames ONLY (no vision models)
+            logger.info(f"Extracting frames at {fps_rate} FPS (vision models will run in Phase 3)...")
 
             # Calculate timestamps
             interval = 1.0 / fps_rate
             timestamps = np.arange(0, video_duration, interval)
 
-            logger.info(f"Will extract ~{len(timestamps)} frames (processing in batches of 32)")
-
-            # Step 1: Extract all frames and metadata
-            frame_batch = []
-            frame_metadata = []
+            logger.info(f"Will extract ~{len(timestamps)} frames")
 
             for i, timestamp in enumerate(timestamps):
                 # Extract frame
@@ -161,46 +97,36 @@ class QuickVisualSampler:
                 if not ret:
                     continue
 
-                # Quality check
+                # Quick quality check
                 quality = self._assess_quality(frame)
                 if quality < min_quality:
                     skipped_count += 1
                     continue
 
-                # Save frame to disk if output directory specified
+                # Save frame to disk (REQUIRED for Phase 3)
                 frame_path = None
                 if frames_dir:
                     frame_filename = f"frame_{frame_num:06d}.jpg"
                     frame_path = frames_dir / frame_filename
                     cv2.imwrite(str(frame_path), frame)
+                else:
+                    logger.warning("No frames_output_dir specified - frames won't be saved!")
+                    continue
 
-                # Add to batch
-                frame_batch.append(frame)
-                frame_metadata.append({
+                # Store minimal metadata (Phase 3 will run all vision models)
+                samples.append({
+                    'frame_id': frame_num,
+                    'frame_path': str(frame_path),
                     'timestamp': timestamp,
-                    'frame_num': frame_num,
-                    'frame_path': frame_path,
                     'quality': quality
                 })
 
-                # Process batch when we have 32 frames
-                if len(frame_batch) == 32:
-                    batch_samples = self._analyze_frame_batch(frame_batch, frame_metadata)
-                    samples.extend(batch_samples)
-                    frame_batch = []
-                    frame_metadata = []
-
-                    if len(samples) % 100 == 0:
-                        logger.info(f"Processed {len(samples)}/{len(timestamps)} frames...")
-
-            # Process remaining frames in batch
-            if len(frame_batch) > 0:
-                batch_samples = self._analyze_frame_batch(frame_batch, frame_metadata)
-                samples.extend(batch_samples)
+                if len(samples) % 100 == 0:
+                    logger.info(f"Extracted {len(samples)}/{len(timestamps)} frames...")
 
         else:
-            # Scene Mode: 1 frame per scene (original behavior)
-            logger.info(f"Sampling {len(scenes)} scenes with FREE models...")
+            # Scene Mode: 1 frame per scene (frame extraction only)
+            logger.info(f"Extracting {len(scenes)} scene frames...")
             if min_quality > 0:
                 logger.info(f"  Filtering scenes with quality < {min_quality:.2f}")
 
@@ -210,6 +136,7 @@ class QuickVisualSampler:
                 if scene_quality < min_quality:
                     skipped_count += 1
                     continue
+
                 # Pick middle of scene
                 mid_timestamp = (scene['start'] + scene['end']) / 2
 
@@ -221,104 +148,41 @@ class QuickVisualSampler:
                 if not ret:
                     continue
 
-                # Save frame to disk if output directory specified
+                # Quick quality check
+                quality = self._assess_quality(frame)
+
+                # Save frame to disk (REQUIRED for Phase 3)
                 frame_path = None
                 if frames_dir:
                     frame_filename = f"frame_{frame_num:06d}.jpg"
                     frame_path = frames_dir / frame_filename
                     cv2.imwrite(str(frame_path), frame)
+                else:
+                    logger.warning("No frames_output_dir specified - frames won't be saved!")
+                    continue
 
-                # Run all FREE models on this frame
-                analysis = self._analyze_frame(frame, mid_timestamp, frame_num, frame_path)
-                samples.append(analysis)
+                # Store minimal metadata
+                samples.append({
+                    'frame_id': frame_num,
+                    'frame_path': str(frame_path),
+                    'timestamp': mid_timestamp,
+                    'quality': quality
+                })
 
                 if len(samples) % 10 == 0:
-                    logger.info(f"Processed {len(samples)}/{len(scenes)} samples...")
+                    logger.info(f"Extracted {len(samples)}/{len(scenes)} frames...")
 
         cap.release()
 
-        logger.info(f"Completed: {len(samples)} frames analyzed with FREE models")
+        logger.info(f"✅ Extracted {len(samples)} frames (vision models will run in Phase 3)")
         if skipped_count > 0:
-            logger.info(f"  Skipped {skipped_count} low-quality scenes (< {min_quality:.2f})")
+            logger.info(f"  Skipped {skipped_count} low-quality frames (< {min_quality:.2f})")
 
         return {
             'samples': samples,
             'total_sampled': len(samples),
             'skipped_low_quality': skipped_count
         }
-    
-    def _analyze_frame_batch(self, frames: List, metadata: List[Dict]) -> List[Dict]:
-        """
-        Run all FREE models on a batch of frames (OPTIMIZED for batch CLIP processing)
-
-        Args:
-            frames: List of frame images
-            metadata: List of metadata dicts for each frame
-
-        Returns:
-            List of analysis results for each frame
-        """
-        # Step 1: BATCH CLIP processing (32 frames at once on GPU)
-        clip_embeddings = self.clip.encode_images_batch(frames)
-
-        # Step 2: Process other models individually (they don't benefit from batching)
-        results = []
-        for i, (frame, meta) in enumerate(zip(frames, metadata)):
-            timestamp = meta['timestamp']
-            frame_num = meta['frame_num']
-            frame_path = meta['frame_path']
-
-            # BLIP-2: Generate caption (OPTIONAL - very slow!)
-            blip2_caption = None
-            if self.blip2:
-                blip2_caption = self.blip2.generate_caption(frame)
-
-            # CLIP embedding (already computed in batch above)
-            clip_embedding = clip_embeddings[i]
-
-            # Places365: Classify scene
-            scene_result = self.places365.classify_scene(frame)
-
-            # YOLO: Detect objects (JIT)
-            object_result = self.yolo.detect_objects_jit(frame, timestamp)
-
-            # OCR: DISABLED - Vision models (Claude/GPT-4o) will detect text in Phase 8
-            ocr_result = {'text_blocks': [], 'block_count': 0}
-
-            # Pose: Detect human poses
-            pose_result = self.pose.detect_pose(frame)
-
-            # FER: Detect emotions (optional)
-            emotions = []
-            if self.fer:
-                emotions = self.fer.detect_emotions(frame)
-
-            results.append({
-                'frame_id': frame_num,
-                'frame_path': str(frame_path) if frame_path else None,
-                'timestamp': timestamp,
-                'blip2_caption': blip2_caption,
-                'clip_embedding': clip_embedding.tolist() if clip_embedding is not None else [],
-                'scene_type': scene_result.scene_category,
-                'objects': [obj.to_dict() for obj in object_result.detections],
-                'text_detected': ocr_result.get('all_text', '') if isinstance(ocr_result, dict) else ocr_result.all_text,
-                'poses': pose_result.to_dict() if pose_result else {},
-                'emotions': emotions,
-                'quality': meta['quality']
-            })
-
-        return results
-
-    def _analyze_frame(self, frame, timestamp: float, frame_num: int, frame_path: Path = None) -> Dict:
-        """Run all FREE models on single frame (for scene mode)"""
-
-        # Use batch processing with single frame
-        return self._analyze_frame_batch([frame], [{
-            'timestamp': timestamp,
-            'frame_num': frame_num,
-            'frame_path': frame_path,
-            'quality': self._assess_quality(frame)
-        }])[0]
     
     def _assess_quality(self, frame) -> float:
         """Quick quality assessment"""
