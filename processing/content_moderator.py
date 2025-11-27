@@ -13,8 +13,15 @@ import cv2
 import numpy as np
 from pathlib import Path
 from typing import Tuple, Dict, Optional
-import pytesseract
 from PIL import Image
+
+# Make pytesseract optional
+try:
+    import pytesseract
+    TESSERACT_AVAILABLE = True
+except ImportError:
+    TESSERACT_AVAILABLE = False
+    pytesseract = None
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +166,11 @@ class ContentModerator:
         Returns:
             (has_subtitles, reason)
         """
+        # ✅ FIX: Skip subtitle check if tesseract is not installed
+        if not TESSERACT_AVAILABLE:
+            logger.info("✅ Tesseract not installed - skipping subtitle check (assuming no subtitles)")
+            return False, "Tesseract not available"
+
         if not sample_frames:
             logger.warning("No sample frames provided - skipping subtitle check")
             return False, "No frames to check"
