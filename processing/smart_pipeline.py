@@ -1406,9 +1406,12 @@ class AdversarialSmartPipeline:
                 frame['scene_type'] = vision_data.get('scene_type', 'unknown')
                 frame['scene_attributes'] = vision_data.get('scene_attributes', [])
                 frame['clip_embedding'] = vision_data.get('clip_embedding', [])
+                # NEW: Merge BLIP-2 captions and OCR text
+                frame['caption'] = vision_data.get('caption', '')
+                frame['ocr_text'] = vision_data.get('ocr_text', '')
 
         logger.info(f"✅ Merged vision data for {len(self.visual_samples)} frames")
-        logger.info(f"   Each frame now has: objects, poses, scene_type, scene_attributes, CLIP embedding")
+        logger.info(f"   Each frame now has: objects, poses, scene_type, scene_attributes, CLIP embedding, caption, OCR text")
 
     def _run_pass1_filter(self):
         """Pass 1: Smart Pre-Filter (3-Tier Selection)"""

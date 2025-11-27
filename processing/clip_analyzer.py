@@ -296,115 +296,226 @@ class CLIPAnalyzer:
         self,
         frames: List[Dict],
         video_path: str = None,  # No longer needed - frames already saved to disk
-        batch_size: int = 32
+        batch_size: int = 24,  # Reduced for parallel processing
+        num_workers: int = 3,  # Parallel workers (optimal for RTX A5000)
+        enable_blip2: bool = True,  # Enable BLIP-2 captions
+        enable_ocr: bool = True  # Enable OCR text extraction
     ) -> List[Dict]:
         """
-        Complete vision analysis for all frames with batching.
+        Complete vision analysis for all frames with PARALLEL batching.
 
-        Runs ALL vision models in batch:
+        Runs ALL vision models in parallel batches:
         - CLIP embeddings
         - YOLO object detection
         - MediaPipe pose detection
         - Places365 scene classification
         - Quality assessment
+        - BLIP-2 image captioning (NEW)
+        - OCR text extraction (NEW)
 
         Args:
             frames: List of frame metadata dicts (from Phase 2 with frame_path)
             video_path: DEPRECATED - not used (frames read from disk)
-            batch_size: Number of frames to process in each batch
+            batch_size: Number of frames to process in each batch (default: 24 for parallel)
+            num_workers: Number of parallel workers (default: 3 for RTX A5000 24GB)
+            enable_blip2: Enable BLIP-2 for image captioning
+            enable_ocr: Enable OCR for text extraction
 
         Returns:
             List of frame analysis dicts with all vision model outputs
         """
-        logger.info(f"🎨 Running complete vision analysis for {len(frames)} frames (batch_size={batch_size})...")
-        logger.info(f"   Models: CLIP, YOLO, MediaPipe, Places365, Quality")
+        logger.info(f"🎨 Running PARALLEL vision analysis for {len(frames)} frames...")
+        logger.info(f"   Batch size: {batch_size}, Workers: {num_workers}")
 
-        # Load vision models
+        models_list = ["CLIP", "YOLO", "MediaPipe", "Places365", "Quality"]
+        if enable_blip2:
+            models_list.append("BLIP-2")
+        if enable_ocr:
+            models_list.append("OCR")
+        logger.info(f"   Models: {', '.join(models_list)}")
+
+        # Load vision models ONCE (shared across workers via threading)
         from .object_detector import ObjectDetector
         from .pose_detector import PoseDetector
         from .places365_processor import Places365Processor
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
 
+        # Initialize models (will be shared across threads)
         yolo = ObjectDetector(device=self.device)
         pose_detector = PoseDetector()
         places365 = Places365Processor()
 
-        frame_analyses = []
+        # Initialize BLIP-2 and OCR if enabled
+        blip2_model = None
+        ocr_reader = None
 
-        # Process in batches
+        if enable_blip2:
+            logger.info("Loading BLIP-2 model...")
+            try:
+                from transformers import Blip2Processor, Blip2ForConditionalGeneration
+                blip2_processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b")
+                blip2_model = Blip2ForConditionalGeneration.from_pretrained(
+                    "Salesforce/blip2-opt-2.7b",
+                    torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
+                ).to(self.device)
+                logger.info("✓ BLIP-2 model loaded")
+            except Exception as e:
+                logger.warning(f"Failed to load BLIP-2: {e}. Continuing without captions.")
+                enable_blip2 = False
+
+        if enable_ocr:
+            logger.info("Loading OCR model...")
+            try:
+                import easyocr
+                ocr_reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
+                logger.info("✓ OCR model loaded")
+            except Exception as e:
+                logger.warning(f"Failed to load OCR: {e}. Continuing without OCR.")
+                enable_ocr = False
+
+        # Split frames into batches
+        all_batches = []
         for batch_idx in range(0, len(frames), batch_size):
             batch = frames[batch_idx:batch_idx + batch_size]
-            batch_images = []
-            batch_metadata = []
+            all_batches.append((batch_idx, batch))
 
-            # Read frames from disk (saved by Phase 2)
-            for frame_meta in batch:
-                frame_path = frame_meta.get('frame_path')
-                if not frame_path or not Path(frame_path).exists():
-                    logger.warning(f"Frame not found: {frame_path}")
-                    continue
+        logger.info(f"Split into {len(all_batches)} batches for parallel processing")
 
-                try:
-                    # Read frame from disk
-                    frame = cv2.imread(str(frame_path))
-                    if frame is None:
-                        logger.warning(f"Failed to read frame: {frame_path}")
+        # Helper method to process a single batch
+        def _process_single_batch(batch_tuple):
+            """Process a single batch of frames with all vision models"""
+            batch_idx, batch = batch_tuple
+            batch_results = []
+
+            try:
+                batch_images = []
+                batch_metadata = []
+
+                # Read frames from disk (saved by Phase 2)
+                for frame_meta in batch:
+                    frame_path = frame_meta.get('frame_path')
+                    if not frame_path or not Path(frame_path).exists():
+                        logger.warning(f"Frame not found: {frame_path}")
                         continue
 
-                    batch_images.append(frame)
-                    batch_metadata.append(frame_meta)
-                except Exception as e:
-                    logger.warning(f"Error reading frame {frame_path}: {e}")
-                    continue
+                    try:
+                        # Read frame from disk
+                        frame = cv2.imread(str(frame_path))
+                        if frame is None:
+                            logger.warning(f"Failed to read frame: {frame_path}")
+                            continue
 
-            # Batch process all vision models
-            if batch_images:
-                try:
-                    # 1. CLIP embeddings (batch)
+                        batch_images.append(frame)
+                        batch_metadata.append(frame_meta)
+                    except Exception as e:
+                        logger.warning(f"Error reading frame {frame_path}: {e}")
+                        continue
+
+                # Process batch with all vision models
+                if batch_images:
+                    # 1. CLIP embeddings (batch processing)
                     clip_embeddings = self.encode_images_batch(batch_images)
 
                     # 2. Process each frame with other models
                     for i, (frame, meta) in enumerate(zip(batch_images, batch_metadata)):
-                        # YOLO object detection
-                        objects = yolo.detect_objects_jit(frame, meta.get('timestamp', 0))
+                        try:
+                            # YOLO object detection
+                            objects = yolo.detect_objects_jit(frame, meta.get('timestamp', 0))
 
-                        # MediaPipe pose detection
-                        poses = pose_detector.detect_pose(frame)
+                            # MediaPipe pose detection
+                            poses = pose_detector.detect_pose(frame)
 
-                        # Places365 scene classification
-                        scene = places365.classify_scene(frame)
+                            # Places365 scene classification
+                            scene = places365.classify_scene(frame)
 
-                        # Quality assessment
-                        quality = self._assess_frame_quality(frame)
+                            # Quality assessment
+                            quality = self._assess_frame_quality(frame)
 
-                        # Combine all results
-                        frame_analyses.append({
-                            'frame_id': meta.get('frame_id'),
-                            'frame_path': meta.get('frame_path'),
-                            'timestamp': meta.get('timestamp'),
-                            'quality': quality,
-                            # CLIP
-                            'clip_embedding': clip_embeddings[i].tolist(),
-                            # YOLO
-                            'objects': [obj.to_dict() for obj in objects.detections],
-                            'object_count': len(objects.detections),
-                            # MediaPipe
-                            'poses': poses.to_dict() if poses else {},
-                            # Places365
-                            'scene_type': scene.scene_category,
-                            'scene_attributes': scene.attributes if hasattr(scene, 'attributes') else []
-                        })
+                            # Base frame analysis
+                            frame_analysis = {
+                                'frame_id': meta.get('frame_id'),
+                                'frame_path': meta.get('frame_path'),
+                                'timestamp': meta.get('timestamp'),
+                                'quality': quality,
+                                # CLIP
+                                'clip_embedding': clip_embeddings[i].tolist(),
+                                # YOLO
+                                'objects': [obj.to_dict() for obj in objects.detections],
+                                'object_count': len(objects.detections),
+                                # MediaPipe
+                                'poses': poses.to_dict() if poses else {},
+                                # Places365
+                                'scene_type': scene.scene_category,
+                                'scene_attributes': scene.attributes if hasattr(scene, 'attributes') else []
+                            }
 
-                except Exception as e:
-                    logger.error(f"Error processing batch at index {batch_idx}: {e}")
-                    continue
+                            # BLIP-2 captioning (if enabled)
+                            if enable_blip2 and blip2_model is not None:
+                                try:
+                                    # Convert frame to PIL Image
+                                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                                    pil_image = Image.fromarray(frame_rgb)
 
-            # Progress logging
-            progress = min(batch_idx + batch_size, len(frames))
-            logger.info(f"Progress: {progress}/{len(frames)} frames processed ({progress*100//len(frames)}%)")
+                                    # Generate caption
+                                    inputs = blip2_processor(images=pil_image, return_tensors="pt").to(self.device)
+                                    with torch.no_grad():
+                                        generated_ids = blip2_model.generate(**inputs, max_length=50)
+                                    caption = blip2_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+                                    frame_analysis['caption'] = caption.strip()
+                                except Exception as e:
+                                    logger.warning(f"BLIP-2 captioning failed for frame {meta.get('frame_id')}: {e}")
+                                    frame_analysis['caption'] = ""
+                            else:
+                                frame_analysis['caption'] = ""
 
-            # Clear memory
+                            # OCR text extraction (if enabled)
+                            if enable_ocr and ocr_reader is not None:
+                                try:
+                                    # Run OCR on frame
+                                    ocr_result = ocr_reader.readtext(frame)
+                                    # Extract text from OCR results
+                                    ocr_texts = [text for (bbox, text, conf) in ocr_result if conf > 0.5]
+                                    frame_analysis['ocr_text'] = ' '.join(ocr_texts)
+                                except Exception as e:
+                                    logger.warning(f"OCR failed for frame {meta.get('frame_id')}: {e}")
+                                    frame_analysis['ocr_text'] = ""
+                            else:
+                                frame_analysis['ocr_text'] = ""
+
+                            batch_results.append(frame_analysis)
+
+                        except Exception as e:
+                            logger.error(f"Error processing frame {meta.get('frame_id')}: {e}")
+                            continue
+
+                    # Progress logging
+                    progress = min(batch_idx + batch_size, len(frames))
+                    logger.info(f"Batch {batch_idx//batch_size + 1}/{len(all_batches)}: {progress}/{len(frames)} frames ({progress*100//len(frames)}%)")
+
+            except Exception as e:
+                logger.error(f"Error processing batch at index {batch_idx}: {e}")
+
+            # Clear GPU cache after batch
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+
+            return batch_results
+
+        # Process batches in parallel using ThreadPoolExecutor
+        frame_analyses = []
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            # Submit all batches for parallel processing
+            logger.info(f"Starting parallel processing with {num_workers} workers...")
+            futures = [executor.submit(_process_single_batch, batch_tuple) for batch_tuple in all_batches]
+
+            # Collect results as they complete
+            for future in futures:
+                try:
+                    batch_results = future.result()
+                    frame_analyses.extend(batch_results)
+                except Exception as e:
+                    logger.error(f"Error collecting batch results: {e}")
 
         logger.info(f"✅ Completed vision analysis for {len(frame_analyses)} frames")
 
