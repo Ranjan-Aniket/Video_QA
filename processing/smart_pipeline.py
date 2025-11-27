@@ -431,10 +431,11 @@ class AdversarialSmartPipeline:
             self.pass2b_results = pass2b_data
             logger.info(f"⚡ Loaded Phase 6: Pass 2B Opus ({len(pass2b_data.get('mode3_inference_window', []))} moments)")
 
-        if up_to_phase >= 7:
-            validation_data = self._load_checkpoint(checkpoint_paths["validation"])
-            self.validation_results = validation_data
-            logger.info(f"⚡ Loaded Phase 7: Validation ({len(validation_data.get('validated_moments', []))} validated)")
+        # ❌ REMOVED: Validation checkpoint loading (validation layer disabled)
+        # if up_to_phase >= 7:
+        #     validation_data = self._load_checkpoint(checkpoint_paths["validation"])
+        #     self.validation_results = validation_data
+        #     logger.info(f"⚡ Loaded Phase 7: Validation ({len(validation_data.get('validated_moments', []))} validated)")
 
         if up_to_phase >= 8:
             pass3_data = self._load_checkpoint(checkpoint_paths["pass3"])
@@ -493,7 +494,7 @@ class AdversarialSmartPipeline:
                     len(self.pass2b_results.get('mode3_inference_window', [])) +
                     len(self.pass2b_results.get('mode4_clusters', []))
                 ) if hasattr(self, 'pass2b_results') else 0,
-                "validated_moments": len(self.validation_results.get('validated_moments', [])) if hasattr(self, 'validation_results') else 0,
+                "total_moments": len(self._combine_pass2_results()) if hasattr(self, 'pass2a_results') and hasattr(self, 'pass2b_results') else 0,
                 "qa_pairs_generated": len(self.questions),
                 "cost_breakdown": {
                     "pass1": self.pass1_results.get('cost', 0) if hasattr(self, 'pass1_results') else 0,
@@ -598,12 +599,14 @@ class AdversarialSmartPipeline:
             else:
                 logger.info("\n🔮 PASS 2B: Opus 4 Selection [SKIPPED - loaded from checkpoint]")
 
-            # Validation Layer: Quality Gate for All Moments
-            if resume_from_phase <= 7:
-                logger.info("\n✅ VALIDATION: Quality Gate for All Moments")
-                self._run_validation()
-            else:
-                logger.info("\n✅ VALIDATION [SKIPPED - loaded from checkpoint]")
+            # ❌ REMOVED: Validation Layer (Per user request - was rejecting all moments)
+            # Validation layer was causing frame existence failures and rejecting valid moments
+            # Now passing Pass 2A/2B results directly to Pass 3
+            # if resume_from_phase <= 7:
+            #     logger.info("\n✅ VALIDATION: Quality Gate for All Moments")
+            #     self._run_validation()
+            # else:
+            #     logger.info("\n✅ VALIDATION [SKIPPED - loaded from checkpoint]")
 
             # Pass 3: Batched QA Generation (Sonnet 4.5)
             if resume_from_phase <= 8:
@@ -1532,6 +1535,22 @@ class AdversarialSmartPipeline:
         logger.info(f"   Rejected: {rejected} moments")
         logger.info(f"   Coverage: {self.validation_results['coverage_check']['meets_requirements']}")
 
+    def _combine_pass2_results(self) -> List[Dict]:
+        """
+        Combine all moments from Pass 2A and Pass 2B without validation.
+
+        Returns:
+            List of all moments from both passes
+        """
+        all_moments = []
+
+        # Combine from all modes
+        for mode_key in ['mode1_precise', 'mode2_micro_temporal', 'mode3_inference_window', 'mode4_clusters']:
+            all_moments.extend(self.pass2a_results.get(mode_key, []))
+            all_moments.extend(self.pass2b_results.get(mode_key, []))
+
+        return all_moments
+
     def _convert_moments_to_phase5_format(self, validated_moments: List[Dict]) -> Dict:
         """
         Convert Pass 2A/2B validated moments to Phase 5 output format for Phase 8.
@@ -1707,10 +1726,12 @@ class AdversarialSmartPipeline:
         logger.info("📍 Starting Pass 3: Phase 8 Vision QA Generation")
         logger.info("   Using GPT-4o Vision with full guideline compliance...")
 
-        # Convert validated moments to Phase 5-like format for Phase 8
-        phase5_compatible = self._convert_moments_to_phase5_format(
-            self.validation_results['validated_moments']
-        )
+        # ✅ BYPASS VALIDATION: Combine Pass 2A + 2B moments directly
+        all_moments = self._combine_pass2_results()
+        logger.info(f"   Combined {len(all_moments)} moments from Pass 2A + 2B (validation bypassed)")
+
+        # Convert moments to Phase 5-like format for Phase 8
+        phase5_compatible = self._convert_moments_to_phase5_format(all_moments)
 
         # ✅ FIX: Extract cluster frames before QA generation
         dense_clusters = phase5_compatible.get('dense_clusters', [])
