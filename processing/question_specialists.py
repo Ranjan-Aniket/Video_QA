@@ -885,6 +885,169 @@ FORBIDDEN:
 }
 
 
+# ============================================================================
+# Audio-Focused Specialists (Audio Target Questions)
+# ============================================================================
+# These specialists ask "what do you HEAR when you SEE X?" instead of
+# "what do you SEE when you HEAR X?". This ensures bidirectional audio-visual reasoning.
+
+AUDIO_FOCUSED_SPECIALISTS = {
+    "Audio-Visual Stitching (Audio Target)": """
+AUDIO-VISUAL STITCHING (AUDIO TARGET):
+Generate 1-2 questions asking what is HEARD during visible actions.
+
+CRITICAL: Question asks about AUDIO, not visual.
+Target: audio_cue field (what sounds/speech/music occurs)
+
+═══════════════════════════════════════════════════════════════════════════════
+DIRECTIONALITY: VISUAL → AUDIO (asking about audio, not visual)
+═══════════════════════════════════════════════════════════════════════════════
+
+Requirements:
+- Describe a VISIBLE action/event/change
+- Ask what AUDIO (speech/music/sound/silence) occurs during that visual
+- Answer describes the audio cue
+- Cannot be answered from visual alone - requires audio analysis
+
+Template: "When [VISUAL EVENT], what [AUDIO ELEMENT] occurs?"
+
+Examples:
+✓ "When the person dunks the basketball, what crowd sound is heard?"
+✓ "As the car speeds up visually, how does the engine sound change?"
+✓ "When the door slams shut on screen, what audio follows immediately?"
+✓ "As the scene transitions from indoor to outdoor, what happens to background music?"
+✓ "When the person raises their hand, what phrase is spoken?"
+
+✗ "What do you see when audio plays?" (visual target - WRONG DIRECTIONALITY)
+✗ "What action occurs when you hear X?" (visual target - WRONG DIRECTIONALITY)
+
+AUDIO MODALITY DIVERSITY:
+Distribute across ALL audio types:
+- SPEECH: "what phrase is spoken", "what is said"
+- MUSIC: "what music starts/stops", "how does tempo change"
+- SOUND EFFECTS: "what sound occurs", "what audio effect plays"
+- CROWD SOUNDS: "what crowd reaction", "what cheering/applause"
+- SILENCE: "what audio gap occurs", "when does silence begin"
+
+⚠️ ANTI-HALLUCINATION CHECK:
+☐ Can I clearly see the visual event I'm describing?
+☐ Is the audio I'm asking about actually present in audio_cue?
+☐ Am I inventing audio-visual connections that don't exist?
+
+FORBIDDEN HEDGING LANGUAGE:
+✗ NO "appears to", "seems to", "looks like", "could be"
+✓ USE DEFINITIVE: "is", "occurs", "plays", "begins", "changes"
+
+FORBIDDEN:
+- No pronouns - use descriptors ("the person", "the individual")
+- No names
+- No "at what time" questions
+""",
+
+    "Temporal Understanding (Audio Target)": """
+TEMPORAL UNDERSTANDING (AUDIO TARGET):
+Generate 1-2 questions about audio progression during visual changes.
+
+CRITICAL: Question asks about AUDIO changes, not visual changes.
+Target: What is HEARD as visuals change
+
+═══════════════════════════════════════════════════════════════════════════════
+DIRECTIONALITY: VISUAL → AUDIO (asking about audio timeline, not visual)
+═══════════════════════════════════════════════════════════════════════════════
+
+Requirements:
+- Describe visual progression/sequence/change
+- Ask about audio timeline/changes during that visual progression
+- Answer describes audio evolution (before/after, starts/stops, increases/decreases)
+- Use temporal language for AUDIO (before/after/during, first/then/finally)
+
+Template: "As [VISUAL CHANGE], what happens to [AUDIO ELEMENT]?"
+
+Examples:
+✓ "As the player moves from left to right, how does the commentary change?"
+✓ "Between the first and third action shown, what audio pattern emerges?"
+✓ "When the visual scene transitions, what happens to background music tempo?"
+✓ "As the person moves closer to camera, how does voice volume change?"
+✓ "From the start to end of this visual sequence, how does crowd noise evolve?"
+
+✗ "When audio changes, what visual occurs?" (visual target - WRONG)
+✗ "What happens after speech ends?" (visual target - WRONG)
+
+AUDIO MODALITY DIVERSITY:
+- SPEECH: "how does narration change", "what phrases are spoken in sequence"
+- MUSIC: "how does tempo/volume change", "what musical transition occurs"
+- SOUND EFFECTS: "what sounds occur in order", "how do audio effects progress"
+- CROWD: "how does crowd volume change", "what crowd reactions occur"
+- SILENCE: "when does audio pause", "what silence gaps appear"
+
+⚠️ ANTI-HALLUCINATION CHECK:
+☐ Can I clearly see the visual progression I'm describing?
+☐ Is the audio progression I'm asking about actually present?
+☐ Am I inventing temporal audio patterns that don't exist?
+
+FORBIDDEN HEDGING LANGUAGE:
+✗ NO "appears to", "seems to", "might", "could be"
+✓ USE DEFINITIVE: "changes", "transitions", "progresses", "shifts"
+
+FORBIDDEN:
+- No pronouns
+- No names
+- No "at what time" questions
+""",
+
+    "Comparative (Audio Target)": """
+COMPARATIVE (AUDIO TARGET):
+Generate 1-2 questions comparing audio elements during different visual moments.
+
+CRITICAL: Question compares AUDIO, not visual elements.
+Target: Differences/similarities in audio between two visual moments
+
+═══════════════════════════════════════════════════════════════════════════════
+DIRECTIONALITY: VISUAL → AUDIO (comparing audio across visual moments)
+═══════════════════════════════════════════════════════════════════════════════
+
+Requirements:
+- Identify two distinct visual moments/actions/elements
+- Ask about AUDIO differences/similarities between them
+- Answer compares audio characteristics (louder/softer, faster/slower, speech/music)
+- Use comparative language for AUDIO (more/less, different/similar, before/after)
+
+Template: "Compare the audio during [VISUAL 1] versus [VISUAL 2]"
+
+Examples:
+✓ "How does the audio differ when the person is standing versus sitting?"
+✓ "Compare the background music during the indoor scene versus outdoor scene"
+✓ "What is the difference in speech tone when showing object A versus object B?"
+✓ "How does crowd noise differ between the first action and second action?"
+✓ "Compare the sound effects when the person enters versus exits"
+
+✗ "Compare the visual during audio 1 versus audio 2" (visual target - WRONG)
+✗ "What visual difference occurs between speeches?" (visual target - WRONG)
+
+AUDIO MODALITY DIVERSITY:
+- SPEECH: "compare narration tone", "speech volume differences"
+- MUSIC: "tempo differences", "music genre changes"
+- SOUND EFFECTS: "compare impact sounds", "audio effect intensity"
+- CROWD: "crowd volume differences", "reaction type changes"
+- SILENCE: "compare pause durations", "silence presence/absence"
+
+⚠️ ANTI-HALLUCINATION CHECK:
+☐ Can I clearly see both visual moments I'm comparing?
+☐ Are the audio differences I'm asking about actually present?
+☐ Am I inventing audio comparisons that don't exist?
+
+FORBIDDEN HEDGING LANGUAGE:
+✗ NO "appears to", "seems to", "might be"
+✓ USE DEFINITIVE: "is", "differs", "changes", "contrasts"
+
+FORBIDDEN:
+- No pronouns
+- No names
+- No "at what time" questions
+""",
+}
+
+
 # Multi-frame cluster prompts for temporal questions
 MULTI_FRAME_PROMPTS = {
     "Temporal Progression": """
@@ -1080,9 +1243,51 @@ VERIFICATION CHECKLIST - Before submitting each question:
 Your questions must cover these {len(question_types)} types:
 """
 
+    # ✅ NEW: Apply directionality targets for bidirectional audio-visual reasoning
+    directionality_targets = config.get('directionality_targets', {
+        'audio_to_visual': 0.40,
+        'visual_to_audio': 0.40,
+        'bidirectional': 0.20
+    })
+
+    # Calculate how many questions should be each directionality
+    audio_to_visual_count = int(target_questions * directionality_targets['audio_to_visual'])
+    visual_to_audio_count = int(target_questions * directionality_targets['visual_to_audio'])
+    # Remaining questions are bidirectional
+
+    # Track current counts
+    audio_to_visual_used = 0
+    visual_to_audio_used = 0
+
     # Add each specialist section
     for i, qtype in enumerate(question_types, 1):
-        specialist_prompt = SPECIALIST_PROMPTS.get(qtype, "")
+        # ✅ NEW: Select specialist based on directionality target
+        # Determine which specialist pool to use for this question type
+        use_audio_focused = False
+
+        # Check if this type has an audio-focused variant
+        audio_focused_key = f"{qtype} (Audio Target)"
+        has_audio_variant = audio_focused_key in AUDIO_FOCUSED_SPECIALISTS
+
+        if has_audio_variant:
+            # Distribute between audio_to_visual and visual_to_audio based on targets
+            if visual_to_audio_used < visual_to_audio_count:
+                use_audio_focused = True
+                visual_to_audio_used += 1
+            elif audio_to_visual_used < audio_to_visual_count:
+                use_audio_focused = False
+                audio_to_visual_used += 1
+            else:
+                # Fallback: alternate between both
+                use_audio_focused = (i % 2 == 0)
+
+        # Select the appropriate specialist prompt
+        if use_audio_focused and has_audio_variant:
+            specialist_prompt = AUDIO_FOCUSED_SPECIALISTS.get(audio_focused_key, "")
+            prompt_label = f"{qtype.upper()} (AUDIO TARGET)"
+        else:
+            specialist_prompt = SPECIALIST_PROMPTS.get(qtype, "")
+            prompt_label = f"{qtype.upper()} (VISUAL TARGET)"
 
         # ✅ FIXED: Always replace template variables (use fallback if audio_cue is empty)
         # Prevents literal {audio_cue} and {audio_snippet} from appearing in prompts
@@ -1092,7 +1297,7 @@ Your questions must cover these {len(question_types)} types:
         specialist_prompt = specialist_prompt.replace("{audio_cue}", audio_cue_value)
         specialist_prompt = specialist_prompt.replace("{audio_snippet}", audio_snippet_value)
 
-        prompt += f"\n{i}. {qtype.upper()}\n{specialist_prompt}\n"
+        prompt += f"\n{i}. {prompt_label}\n{specialist_prompt}\n"
 
     # Add output format instructions
     prompt += f"""

@@ -50,6 +50,7 @@ from .question_specialists import (
     build_specialist_prompt,
     get_question_type_priority,
     SPECIALIST_PROMPTS,
+    AUDIO_FOCUSED_SPECIALISTS,
     MULTI_FRAME_PROMPTS,
     detect_sub_task_types
 )
@@ -719,6 +720,13 @@ PHASE8_CONFIG = {
 
     # Quality control - Duplicate detection
     'duplicate_similarity_threshold': 0.7,  # Similarity score above which questions are flagged as duplicates (0.7 = 70% similar)
+
+    # ✅ NEW: Directionality targets for bidirectional audio-visual reasoning
+    'directionality_targets': {
+        'audio_to_visual': 0.40,  # 40% ask "what do you SEE when you HEAR X?"
+        'visual_to_audio': 0.40,  # 40% ask "what do you HEAR when you SEE X?"
+        'bidirectional': 0.20     # 20% correlational/comparative (both directions)
+    },
 
     # Model - GPT-4o for all frames (30% cheaper than Claude, excellent vision)
     'model': 'gpt-4o-2024-11-20'
