@@ -403,8 +403,13 @@ async def get_frame_extraction(video_id: str):
         with open(metadata_file, 'r') as f:
             metadata = json.load(f)
 
-        # Count frames by type
-        frames = metadata.get("frames", [])
+        # Handle both old and new formats
+        if isinstance(metadata, list):
+            # New format: list of frames directly
+            frames = metadata
+        else:
+            # Old format: dict with "frames" key
+            frames = metadata.get("frames", [])
         premium_count = sum(1 for f in frames if f.get("frame_type") == "premium")
         template_count = sum(1 for f in frames if f.get("frame_type") == "template")
         bulk_count = sum(1 for f in frames if f.get("frame_type") == "bulk")

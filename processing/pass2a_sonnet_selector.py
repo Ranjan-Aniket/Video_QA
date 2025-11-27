@@ -691,7 +691,7 @@ Begin analysis. Focus on quality over quantity - prioritize truly adversarial mo
             logger.error(f"Sonnet 4.5 call failed: {e}")
             return {"moments": [], "flagged_for_opus4": [], "coverage": {}, "error": str(e)}
 
-    def _batch_frames(self, frames: List[Dict], batch_size: int = 50):
+    def _batch_frames(self, frames: List[Dict], batch_size: int = 20):
         """
         Split frames into batches to avoid API limits
 
@@ -980,8 +980,8 @@ Begin analysis. Focus on quality over quantity - prioritize truly adversarial mo
                 'cost': 0
             }
 
-        # Batch frames to avoid API limits
-        batches = list(self._batch_frames(prepared_frames, batch_size=50))
+        # Batch frames to avoid API limits (reduced to 20 to prevent timeouts)
+        batches = list(self._batch_frames(prepared_frames, batch_size=20))
         logger.info(f"Processing {len(prepared_frames)} frames in {len(batches)} batches...")
 
         # Call Sonnet 4.5 for each batch and merge results
