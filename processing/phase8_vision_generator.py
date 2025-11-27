@@ -2037,12 +2037,21 @@ class Phase8VisionGenerator:
         with open(metadata_path, 'r') as f:
             metadata = json.load(f)
 
+        # Handle both formats: direct array or dict with "frames" key
+        if isinstance(metadata, list):
+            # New format: direct array [{frame1}, {frame2}]
+            frame_list = metadata
+        else:
+            # Old format: dict with "frames" key {"frames": [...]}
+            frame_list = metadata.get('frames', [])
+
         # Build timestamp -> (frame_id, image_path) mapping
         timestamp_to_frame_info = {}
-        for frame_meta in metadata.get('frames', []):
+        for frame_meta in frame_list:
             timestamp = frame_meta.get('timestamp')
             frame_id = frame_meta.get('frame_id')
-            image_path = frame_meta.get('image_path')
+            # Handle both 'image_path' and 'frame_path' keys
+            image_path = frame_meta.get('image_path') or frame_meta.get('frame_path')
             if timestamp is not None and frame_id:
                 timestamp_to_frame_info[timestamp] = {
                     'frame_id': frame_id,
@@ -2913,9 +2922,16 @@ class Phase8VisionGenerator:
         image_path_str = frame.get('image_path')
 
         if not image_path_str:
-            # Fallback: Try to construct path
+            # Fallback: Try to construct path using multiple strategies
             logger.warning(f"      No image_path in frame data, trying to construct...")
-            image_path = frames_dir / f"{frame_id}_{timestamp}s.jpg"
+
+            # Strategy 1: If frame_id is numeric, try Phase 2 format: frame_XXXXXX.jpg
+            if isinstance(frame_id, int) or (isinstance(frame_id, str) and frame_id.isdigit()):
+                image_path = frames_dir / f"frame_{int(frame_id):06d}.jpg"
+            # Strategy 2: Try with timestamp suffix
+            elif not image_path.exists():
+                image_path = frames_dir / f"{frame_id}_{timestamp}s.jpg"
+            # Strategy 3: Try plain frame_id
             if not image_path.exists():
                 image_path = frames_dir / f"{frame_id}.jpg"
         else:
