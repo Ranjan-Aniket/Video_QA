@@ -101,8 +101,9 @@ class Pass2ASonnetSelector:
             },
             "micro_temporal": {
                 "duration": "3-8s",
-                "types": [],  # ✅ FIXED GAP #1 & #11: Moved Context and Counting to inference_window
-                "description": "Short observations (currently unused, reserved for future types)"
+                "types": ["Comparative", "Temporal Understanding", "Object Interaction Reasoning"],
+                "description": "Short observations - quick comparisons, state changes, object transformations",
+                "min_windows": "10s (short temporal window requirements)"
             },
             "inference_window": {
                 "duration": "8-15s",
@@ -112,9 +113,8 @@ class Pass2ASonnetSelector:
             },
             "cluster": {
                 "duration": "15-60s",
-                "types": ["Sequential", "Subscene", "Comparative",
-                         "Audio-Visual Stitching", "Tackling Spurious Correlations",
-                         "Temporal Understanding", "Object Interaction Reasoning"],
+                "types": ["Sequential", "Subscene",
+                         "Audio-Visual Stitching", "Tackling Spurious Correlations"],
                 "description": "Extended continuous action, progression over time, temporal changes",
                 "min_windows": "20-40s (high temporal window requirements)"
             }
