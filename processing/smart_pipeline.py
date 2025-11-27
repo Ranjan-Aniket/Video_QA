@@ -1661,7 +1661,7 @@ class AdversarialSmartPipeline:
                 else:
                     # Extract frame from video
                     import cv2
-                    video_path = self.output_dir / f"{self.video_id}_video.mp4"
+                    video_path = self.video_path  # Use original video path from __init__
 
                     if not video_path.exists():
                         logger.warning(f"    Video file not found: {video_path}")
