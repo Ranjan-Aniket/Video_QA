@@ -20,10 +20,21 @@ from dataclasses import dataclass
 import json
 from loguru import logger
 
-# Import utility for numpy type conversion
-import sys
-sys.path.append(str(Path(__file__).parent))
-from smart_pipeline import convert_numpy_types
+
+def convert_numpy_types(obj):
+    """Convert numpy types to Python native types for JSON serialization"""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {key: convert_numpy_types(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(item) for item in obj]
+    else:
+        return obj
 
 try:
     import clip
