@@ -168,7 +168,7 @@ class OCRProcessor:
             self._init_paddleocr()
 
     def _init_paddleocr(self):
-        """Initialize PaddleOCR engine (lazy loading)"""
+        """Initialize PaddleOCR engine (lazy loading) - FAST GPU MODE"""
         try:
             from paddleocr import PaddleOCR
 
@@ -180,30 +180,51 @@ class OCRProcessor:
             except ImportError:
                 pass
 
-            # Initialize PaddleOCR with English language + GPU if available
+            # ⚡ FAST MODE: Optimized config for maximum speed with GPU
             ocr_config = {
-                'use_angle_cls': False,  # Disable angle classification for speed
-                'lang': 'en',  # English
-                'show_log': False,  # Suppress PaddleOCR logging
-                'use_gpu': use_gpu,  # Auto-detected GPU (10x speedup if available)
-                'enable_mkldnn': True,  # Intel MKL-DNN optimization for CPU
+                'use_angle_cls': False,  # ⚡ Disable angle classification (faster)
+                'lang': 'en',  # English only
+                'show_log': False,  # Suppress logging
+                'use_gpu': use_gpu,  # GPU acceleration (10x faster)
+                'enable_mkldnn': not use_gpu,  # Intel MKL-DNN only on CPU
+                'det_db_thresh': 0.3,  # ⚡ Lower threshold for faster detection
+                'det_db_box_thresh': 0.5,  # ⚡ Lower box threshold
+                'use_mp': True,  # ⚡ Enable multiprocessing for batch processing
+                'total_process_num': 4,  # ⚡ Use 4 processes for parallel processing
+                'use_dilation': False,  # ⚡ Disable dilation (faster)
+                'det_db_unclip_ratio': 1.5,  # Default unclip ratio
             }
 
-            # Only set gpu_mem if GPU is available
+            # GPU-specific optimizations
             if use_gpu:
-                ocr_config['gpu_mem'] = 2000  # Allocate 2GB GPU memory
-                logger.info("PaddleOCR initializing with GPU acceleration")
+                ocr_config.update({
+                    'gpu_mem': 4000,  # ⚡ Allocate 4GB GPU memory (more = faster)
+                    'use_tensorrt': False,  # TensorRT optimization (requires separate install)
+                    'precision': 'fp16',  # ⚡ FP16 precision for faster inference on GPU
+                })
+                logger.info("⚡ PaddleOCR FAST GPU MODE: FP16 precision, 4GB VRAM, multiprocessing enabled")
             else:
-                logger.info("PaddleOCR initializing in CPU mode")
+                logger.info("⚡ PaddleOCR FAST CPU MODE: Multiprocessing enabled")
 
             self.ocr_engine = PaddleOCR(**ocr_config)
-            logger.info(f"PaddleOCR engine initialized ({'GPU' if use_gpu else 'CPU'} mode)")
+            logger.info(f"✓ PaddleOCR ready ({'GPU' if use_gpu else 'CPU'} mode)")
         except ImportError:
-            logger.warning("PaddleOCR not available. Install with: pip install paddleocr")
+            logger.warning("PaddleOCR not available. Install with: pip install paddleocr paddlepaddle-gpu")
             self.ocr_engine = None
         except Exception as e:
             logger.error(f"Failed to initialize PaddleOCR: {e}")
-            self.ocr_engine = None
+            logger.info("Retrying with basic config...")
+            try:
+                # Fallback to basic config
+                self.ocr_engine = PaddleOCR(
+                    use_angle_cls=False,
+                    lang='en',
+                    show_log=False,
+                    use_gpu=use_gpu
+                )
+                logger.info(f"✓ PaddleOCR ready (basic config)")
+            except:
+                self.ocr_engine = None
     
     def extract_text_from_frames(
         self,
@@ -270,23 +291,38 @@ class OCRProcessor:
     ) -> FrameOCRResult:
         """
         Extract text from single frame on-demand (JIT).
-        
+
         This is the most cost-effective method for question-specific OCR.
-        
+
         Args:
             frame: Frame image (HxWxC numpy array)
             timestamp: Frame timestamp in video
-        
+
         Returns:
             FrameOCRResult with detected text
         """
         text_blocks = self._extract_text_from_frame(frame)
-        
+
         return FrameOCRResult(
             frame_index=-1,  # Unknown frame index for JIT
             timestamp=timestamp,
             text_blocks=text_blocks
         )
+
+    def extract_text_from_frame(self, frame: np.ndarray) -> List[Dict[str, Any]]:
+        """
+        Extract text from single frame (public API for evidence extraction).
+
+        Args:
+            frame: Frame image (HxWxC numpy array)
+
+        Returns:
+            List of text block dictionaries with 'text', 'confidence', 'bounding_box', etc.
+        """
+        text_blocks = self._extract_text_from_frame(frame)
+
+        # Convert TextBlock objects to dictionaries
+        return [block.to_dict() for block in text_blocks]
     
     def _extract_text_from_frame(
         self, frame: np.ndarray
@@ -301,15 +337,15 @@ class OCRProcessor:
             List of detected text blocks
         """
         if self.use_local_ocr:
-            return self._extract_with_paddleocr(frame)
+            return self._extract_with_local_ocr(frame)
         else:
             return self._extract_with_google_vision(frame)
-    
-    def _extract_with_paddleocr(
+
+    def _extract_with_local_ocr(
         self, frame: np.ndarray
     ) -> List[TextBlock]:
         """
-        Extract text using PaddleOCR (local, free).
+        Extract text using local OCR (EasyOCR or PaddleOCR).
 
         Args:
             frame: Frame image (HxWxC numpy array, BGR or RGB format)
@@ -319,10 +355,8 @@ class OCRProcessor:
         """
         # Initialize OCR engine if not already loaded
         if self.ocr_engine is None:
-            if self.use_local_ocr:
-                self._init_easyocr()
-            else:
-                self._init_paddleocr()
+            logger.info("OCR engine not loaded, initializing...")
+            self._init_easyocr()  # This will fallback to PaddleOCR if EasyOCR fails
 
         if self.ocr_engine is None:
             logger.warning("OCR engine not available, returning empty")
@@ -378,11 +412,21 @@ class OCRProcessor:
                         language="en"
                     ))
 
-            logger.debug(f"PaddleOCR detected {len(text_blocks)} text blocks")
+            engine_name = "EasyOCR" if isinstance(self.ocr_engine, easyocr.Reader) else "PaddleOCR"
+            logger.debug(f"{engine_name} detected {len(text_blocks)} text blocks")
             return text_blocks
 
         except Exception as e:
-            logger.error(f"PaddleOCR extraction failed: {e}")
+            engine_name = "EasyOCR/PaddleOCR"
+            try:
+                import easyocr
+                if isinstance(self.ocr_engine, easyocr.Reader):
+                    engine_name = "EasyOCR"
+                else:
+                    engine_name = "PaddleOCR"
+            except:
+                pass
+            logger.error(f"{engine_name} extraction failed: {e}")
             import traceback
             traceback.print_exc()
             return []

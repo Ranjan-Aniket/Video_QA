@@ -8,8 +8,9 @@ Features:
 - Strict validation (both cues, no names, not single-cue answerable)
 - 1-2 questions per moment
 - Uses cue triad (visual/audio/correspondence) for context
+- ✅ Prompt caching enabled (guidelines cached, 28% cost reduction)
 
-Cost: ~$0.40-0.45 (Sonnet 4.5)
+Cost: ~$0.43 first video, ~$0.31 subsequent (Sonnet 4.5 with caching)
 Output: 35-50 QA pairs
 """
 

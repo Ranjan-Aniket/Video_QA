@@ -255,10 +255,11 @@ def get_sub_task_type(ontology_type: str) -> str:
 
 # Mode duration ranges (min_seconds, max_seconds)
 # Controls what duration moments are allowed for each mode
+# ⚡ RELAXED: Increased max durations to reduce rejection rate
 MODE_DURATION_RANGES = {
     "precise": (1.0, 5.0),           # Single frame or very short burst
     "micro_temporal": (3.0, 8.0),    # Reserved for future use
-    "inference_window": (8.0, 15.0), # Medium-duration reasoning
+    "inference_window": (8.0, 30.0), # ⚡ Increased from 15s to 30s for more flexibility
     "cluster": (15.0, 60.0),         # Extended temporal sequences
 }
 

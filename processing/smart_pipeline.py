@@ -1679,14 +1679,15 @@ class AdversarialSmartPipeline:
 
                     cap.release()
 
-                # Add to metadata
-                all_frames_metadata.append({
-                    'frame_id': frame_id,
-                    'timestamp': ts,
-                    'image_path': str(frame_path),
-                    'frame_type': 'cluster',
-                    'cluster_id': f"cluster_{cluster_idx:02d}"
-                })
+                # Add to metadata ONLY if frame file actually exists
+                if frame_path.exists():
+                    all_frames_metadata.append({
+                        'frame_id': frame_id,
+                        'timestamp': ts,
+                        'image_path': str(frame_path),
+                        'frame_type': 'cluster',
+                        'cluster_id': f"cluster_{cluster_idx:02d}"
+                    })
 
         # Save frames_metadata.json
         metadata_path = frames_dir / "frames_metadata.json"
