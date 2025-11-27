@@ -871,8 +871,10 @@ Begin deep analysis. Use your full reasoning capabilities - these are the hardes
                     moment['sub_task_type'] = get_sub_task_type(ontology_type)
                 valid_moments.append(moment)
             else:
+                timestamps = moment.get('timestamps', [])
+                timestamp_str = f"{timestamps[0]:.1f}s" if timestamps else "N/A"
                 logger.warning(f"Rejected moment (ontology={moment.get('primary_ontology')}, "
-                              f"timestamp={moment.get('timestamps', [0])[0]:.1f}s): {rejection_reason}")
+                              f"timestamp={timestamp_str}): {rejection_reason}")
                 rejected_moments.append({
                     'moment': moment,
                     'rejection_reason': rejection_reason
