@@ -2590,30 +2590,33 @@ class Phase8VisionGenerator:
                 )
                 self.cost_tracker.add_question(q_stat)
 
-            # ✅ CRITICAL: Validate questions match assigned ontologies from Pass 2A/2B
-            assigned_ontologies = cluster_metadata.get('question_types', [])
-            validated_questions = []
-            rejected_count = 0
+            # ❌ REMOVED: Ontology validation (Per user request - Pass 2A/2B already validated)
+            # GPT-4o often identifies valid secondary ontologies that Pass 2A/2B missed.
+            # Validation was rejecting 94% of questions (48/51) with false positives.
+            # Trust GPT-4o's ontology judgment since Pass 2A/2B already validated the moments.
+            # assigned_ontologies = cluster_metadata.get('question_types', [])
+            # validated_questions = []
+            # rejected_count = 0
+            #
+            # for q in questions:
+            #     is_valid, rejection_reason = self._validate_question_ontology_match(
+            #         question=q,
+            #         assigned_ontologies=assigned_ontologies,
+            #         moment_mode="cluster"
+            #     )
+            #
+            #     if is_valid:
+            #         validated_questions.append(q)
+            #     else:
+            #         rejected_count += 1
+            #         logger.warning(f"      ❌ Rejected question: {rejection_reason}")
+            #         logger.warning(f"         Question: {q.question[:80]}...")
+            #         logger.warning(f"         Type: {q.question_type}, Assigned: {assigned_ontologies}")
+            #
+            # if rejected_count > 0:
+            #     logger.info(f"      Ontology validation: {len(validated_questions)}/{len(questions)} questions passed")
 
-            for q in questions:
-                is_valid, rejection_reason = self._validate_question_ontology_match(
-                    question=q,
-                    assigned_ontologies=assigned_ontologies,
-                    moment_mode="cluster"
-                )
-
-                if is_valid:
-                    validated_questions.append(q)
-                else:
-                    rejected_count += 1
-                    logger.warning(f"      ❌ Rejected question: {rejection_reason}")
-                    logger.warning(f"         Question: {q.question[:80]}...")
-                    logger.warning(f"         Type: {q.question_type}, Assigned: {assigned_ontologies}")
-
-            if rejected_count > 0:
-                logger.info(f"      Ontology validation: {len(validated_questions)}/{len(questions)} questions passed")
-
-            return validated_questions
+            return questions  # Return all questions without validation
 
         except Exception as e:
             logger.error(f"      Error generating cluster questions: {e}")
@@ -2825,26 +2828,28 @@ class Phase8VisionGenerator:
                 raw_type = q_data.get('question_type', 'Unknown')
                 normalized_type = normalize_question_type(raw_type)
 
-                # ✅ NEW: Enforce minimum temporal windows by question type
-                # (using get_min_temporal_window imported at top)
-                min_window = get_min_temporal_window(normalized_type)
-                actual_window = end_seconds - start_seconds
-
-                if actual_window < min_window:
-                    logger.warning(
-                        f"      Question {i+1}: Window too short ({actual_window:.1f}s < {min_window:.1f}s required for {normalized_type})"
-                    )
-
-                    # Expand window symmetrically around center
-                    center = (start_seconds + end_seconds) / 2 if end_seconds > start_seconds else default_timestamp
-                    half_window = min_window / 2
-
-                    start_seconds = max(0, center - half_window)
-                    end_seconds = center + half_window
-
-                    logger.info(
-                        f"      Expanded window: {start_seconds:.1f}s - {end_seconds:.1f}s ({min_window:.1f}s total)"
-                    )
+                # ❌ REMOVED: Temporal window enforcement (not in official PDF guidelines)
+                # Official "Question Types_ Skills.pdf" does NOT specify minimum temporal windows.
+                # Temporal window requirements (10s, 20s, 30s, 40s) were internal conventions.
+                # Trust Pass 2A/2B's moment duration decisions.
+                # min_window = get_min_temporal_window(normalized_type)
+                # actual_window = end_seconds - start_seconds
+                #
+                # if actual_window < min_window:
+                #     logger.warning(
+                #         f"      Question {i+1}: Window too short ({actual_window:.1f}s < {min_window:.1f}s required for {normalized_type})"
+                #     )
+                #
+                #     # Expand window symmetrically around center
+                #     center = (start_seconds + end_seconds) / 2 if end_seconds > start_seconds else default_timestamp
+                #     half_window = min_window / 2
+                #
+                #     start_seconds = max(0, center - half_window)
+                #     end_seconds = center + half_window
+                #
+                #     logger.info(
+                #         f"      Expanded window: {start_seconds:.1f}s - {end_seconds:.1f}s ({min_window:.1f}s total)"
+                #     )
 
                 # ✅ FIX #9: Generate unique question IDs using cluster_index
                 if cluster_index is not None:
@@ -3103,31 +3108,34 @@ class Phase8VisionGenerator:
                 )
                 self.cost_tracker.add_question(q_stat)
 
-            # ✅ CRITICAL: Validate questions match assigned ontologies from Pass 2A/2B
-            assigned_ontologies = frame.get('question_types', [])
-            moment_mode = frame.get('mode', 'precise')  # Default to precise for single frames
-            validated_questions = []
-            rejected_count = 0
+            # ❌ REMOVED: Ontology validation (Per user request - Pass 2A/2B already validated)
+            # GPT-4o often identifies valid secondary ontologies that Pass 2A/2B missed.
+            # Validation was rejecting 94% of questions (48/51) with false positives.
+            # Trust GPT-4o's ontology judgment since Pass 2A/2B already validated the moments.
+            # assigned_ontologies = frame.get('question_types', [])
+            # moment_mode = frame.get('mode', 'precise')  # Default to precise for single frames
+            # validated_questions = []
+            # rejected_count = 0
+            #
+            # for q in generated_questions:
+            #     is_valid, rejection_reason = self._validate_question_ontology_match(
+            #         question=q,
+            #         assigned_ontologies=assigned_ontologies,
+            #         moment_mode=moment_mode
+            #     )
+            #
+            #     if is_valid:
+            #         validated_questions.append(q)
+            #     else:
+            #         rejected_count += 1
+            #         logger.warning(f"      ❌ Rejected question: {rejection_reason}")
+            #         logger.warning(f"         Question: {q.question[:80]}...")
+            #         logger.warning(f"         Type: {q.question_type}, Assigned: {assigned_ontologies}")
+            #
+            # if rejected_count > 0:
+            #     logger.info(f"      Ontology validation: {len(validated_questions)}/{len(generated_questions)} questions passed")
 
-            for q in generated_questions:
-                is_valid, rejection_reason = self._validate_question_ontology_match(
-                    question=q,
-                    assigned_ontologies=assigned_ontologies,
-                    moment_mode=moment_mode
-                )
-
-                if is_valid:
-                    validated_questions.append(q)
-                else:
-                    rejected_count += 1
-                    logger.warning(f"      ❌ Rejected question: {rejection_reason}")
-                    logger.warning(f"         Question: {q.question[:80]}...")
-                    logger.warning(f"         Type: {q.question_type}, Assigned: {assigned_ontologies}")
-
-            if rejected_count > 0:
-                logger.info(f"      Ontology validation: {len(validated_questions)}/{len(generated_questions)} questions passed")
-
-            return validated_questions
+            return generated_questions  # Return all questions without validation
 
         except Exception as e:
             logger.error(f"      GPT-4o API call failed: {e}")
