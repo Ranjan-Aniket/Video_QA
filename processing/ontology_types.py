@@ -147,30 +147,30 @@ def get_short_name(official_type: str) -> str:
     return reverse_map.get(official_type, official_type)
 
 
-# Minimum temporal windows by type (from Guidelines PDF)
-# These define the minimum time span (start_timestamp to end_timestamp)
-# required for each question type to have sufficient context.
+# Minimum temporal windows by type (aligned with mode durations)
+# NOTE: Official guidelines do NOT specify minimum temporal windows.
+# These are permissive minimums to ensure basic context exists.
 MIN_TEMPORAL_WINDOWS = {
-    # Very high complexity (40-60 seconds) - requires extended temporal reasoning
-    "Comparative": 40.0,
-    "Tackling Spurious Correlations": 40.0,
+    # Mode 1 types (Precise, 1-5s moments) - minimal context
+    "Needle": 1.0,
+    "Referential Grounding": 1.0,
 
-    # High complexity (30-40 seconds) - requires multi-step temporal reasoning
-    "Sequential": 30.0,
-    "Temporal Understanding": 30.0,
-    "Subscene": 30.0,
-    "Object Interaction Reasoning": 30.0,
+    # Mode 2 types (Micro-temporal, 3-8s moments) - short context
+    "Comparative": 3.0,
+    "Temporal Understanding": 3.0,
+    "Object Interaction Reasoning": 3.0,
 
-    # Moderate complexity (20-25 seconds) - requires context integration
-    "Inference": 20.0,
-    "Context": 20.0,
-    "General Holistic Reasoning": 20.0,
-    "Audio-Visual Stitching": 20.0,
+    # Mode 3 types (Inference Window, 8-15s moments) - moderate context
+    "Inference": 5.0,
+    "Context": 5.0,
+    "General Holistic Reasoning": 5.0,
+    "Counting": 5.0,
 
-    # Simple observation (10-15 seconds) - single-moment observation
-    "Needle": 10.0,
-    "Counting": 10.0,
-    "Referential Grounding": 10.0,
+    # Mode 4 types (Cluster, 15-60s moments) - extended context
+    "Sequential": 10.0,
+    "Subscene": 10.0,
+    "Audio-Visual Stitching": 10.0,
+    "Tackling Spurious Correlations": 10.0,
 }
 
 
@@ -215,19 +215,20 @@ def get_min_temporal_window(ontology_type: str) -> float:
     """
     Get minimum temporal window (in seconds) for a question type.
 
-    Per Guidelines PDF requirements:
-    - Simple observation: 10-15s
-    - Moderate complexity: 20-25s
-    - High complexity: 30-40s
-    - Very high complexity: 40-60s
+    NOTE: Official guidelines do NOT specify minimum temporal windows.
+    These are permissive minimums aligned with mode durations:
+    - Mode 1 (Precise): 1s
+    - Mode 2 (Micro-temporal): 3s
+    - Mode 3 (Inference): 5s
+    - Mode 4 (Cluster): 10s
 
     Args:
         ontology_type: Official ontology type name
 
     Returns:
-        Minimum window duration in seconds (default 10.0)
+        Minimum window duration in seconds (default 3.0)
     """
-    return MIN_TEMPORAL_WINDOWS.get(ontology_type, 10.0)
+    return MIN_TEMPORAL_WINDOWS.get(ontology_type, 3.0)
 
 
 def get_sub_task_type(ontology_type: str) -> str:
