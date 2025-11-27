@@ -240,12 +240,12 @@ class Pass1SmartFilter:
             clip_analysis
         )
 
-        # Call Sonnet 3.5
+        # Call Sonnet 4.5
         prompt = self._build_tier3_prompt(metadata_summary, budget)
 
         try:
             response = self.client.messages.create(
-                model="claude-3-5-sonnet-20240620",
+                model="claude-sonnet-4-5-20250929",
                 max_tokens=4000,
                 messages=[
                     {"role": "user", "content": prompt}
