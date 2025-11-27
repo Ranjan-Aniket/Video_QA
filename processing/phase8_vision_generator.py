@@ -3320,17 +3320,39 @@ class Phase8VisionGenerator:
                 )
 
                 if duplicates:
-                    logger.warning(f"   ⚠️  Found {len(duplicates)} audio duplicate pairs")
+                    logger.warning(f"   ⚠️  Found {len(duplicates)} audio duplicate pairs (before cluster filtering)")
 
-                    # Remove lower-confidence question from each duplicate pair
-                    to_remove = set()
+                    # ✅ FIX: Filter out duplicates from same cluster (expected to have same audio)
+                    # Questions from same cluster share the same frame_id (cluster_XXXX_YYYY)
+                    cross_cluster_duplicates = []
+                    same_cluster_skipped = 0
+
                     for idx1, idx2, similarity in duplicates:
                         q1 = validated_questions[idx1]
                         q2 = validated_questions[idx2]
 
+                        # Skip if both questions are from the same cluster
+                        if q1.frame_id == q2.frame_id:
+                            same_cluster_skipped += 1
+                            logger.debug(f"      Skipping same-cluster duplicate: Q{idx1} ↔ Q{idx2} (both from {q1.frame_id})")
+                            continue
+
+                        cross_cluster_duplicates.append((idx1, idx2, similarity))
+
+                    if same_cluster_skipped > 0:
+                        logger.info(f"   ✓ Skipped {same_cluster_skipped} same-cluster duplicates (expected behavior)")
+
+                    logger.warning(f"   ⚠️  Found {len(cross_cluster_duplicates)} cross-cluster audio duplicates")
+
+                    # Remove lower-confidence question from each duplicate pair
+                    to_remove = set()
+                    for idx1, idx2, similarity in cross_cluster_duplicates:
+                        q1 = validated_questions[idx1]
+                        q2 = validated_questions[idx2]
+
                         logger.debug(f"      Duplicate: Q{idx1} ↔ Q{idx2} (similarity={similarity:.2f})")
-                        logger.debug(f"         Q{idx1}: confidence={q1.confidence:.2f}")
-                        logger.debug(f"         Q{idx2}: confidence={q2.confidence:.2f}")
+                        logger.debug(f"         Q{idx1}: confidence={q1.confidence:.2f}, cluster={q1.frame_id}")
+                        logger.debug(f"         Q{idx2}: confidence={q2.confidence:.2f}, cluster={q2.frame_id}")
 
                         # Remove lower-confidence question
                         if q1.confidence < q2.confidence:

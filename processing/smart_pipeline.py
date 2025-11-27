@@ -1634,23 +1634,24 @@ class AdversarialSmartPipeline:
             }
         }
 
-    def _extract_cluster_frames(self, dense_clusters: List[Dict]) -> None:
+    def _extract_cluster_frames(self, dense_clusters: List[Dict], single_frames: List[Dict] = None) -> None:
         """
-        Extract frames for clusters identified by Pass 2B.
+        Extract frames for clusters and single frames from Pass 2A/2B.
 
         Creates frames_metadata.json that Phase 8 expects.
 
         Args:
             dense_clusters: Cluster metadata from _convert_moments_to_phase5_format
+            single_frames: Single frame metadata from _convert_moments_to_phase5_format
         """
-        if not dense_clusters:
-            logger.info("No clusters to extract frames for")
+        if not dense_clusters and not single_frames:
+            logger.info("No clusters or single frames to extract")
             return
 
         frames_dir = self.output_dir / "frames" / self.video_id
         frames_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"Extracting frames for {len(dense_clusters)} clusters...")
+        logger.info(f"Extracting frames for {len(dense_clusters)} clusters and {len(single_frames or [])} single frames...")
 
         all_frames_metadata = []
 
@@ -1709,16 +1710,55 @@ class AdversarialSmartPipeline:
                         'cluster_id': f"cluster_{cluster_idx:02d}"
                     })
 
+        # ✅ FIX: Extract single frames too (from Pass 2A/2B precise/inference moments)
+        if single_frames:
+            logger.info(f"  Extracting {len(single_frames)} single frames...")
+            for single_frame in single_frames:
+                ts = single_frame['timestamp']
+                frame_id = int(ts * 24)  # Assume 24 FPS
+                frame_path = frames_dir / f"frame_{frame_id:06d}.jpg"
+
+                # Skip if frame already exists
+                if not frame_path.exists():
+                    # Extract frame from video
+                    import cv2
+                    video_path = self.video_path
+
+                    if video_path.exists():
+                        cap = cv2.VideoCapture(str(video_path))
+                        cap.set(cv2.CAP_PROP_POS_MSEC, ts * 1000)
+                        ret, frame = cap.read()
+
+                        if ret:
+                            cv2.imwrite(str(frame_path), frame)
+                            logger.debug(f"    Extracted single frame: {frame_path.name}")
+
+                        cap.release()
+
+                # Add to metadata if frame exists
+                if frame_path.exists():
+                    all_frames_metadata.append({
+                        'frame_id': frame_id,
+                        'timestamp': ts,
+                        'image_path': str(frame_path),
+                        'frame_type': 'single',
+                        'priority': single_frame.get('priority', 0.8),
+                        'question_types': single_frame.get('question_types', [])
+                    })
+
         # Save frames_metadata.json
         metadata_path = frames_dir / "frames_metadata.json"
         with open(metadata_path, 'w') as f:
             json.dump({
                 'frames': all_frames_metadata,
                 'total_frames': len(all_frames_metadata),
-                'extraction_method': 'cluster_extraction_pass3'
+                'extraction_method': 'cluster_and_single_frame_extraction_pass3'
             }, f, indent=2)
 
-        logger.info(f"✅ Extracted {len(all_frames_metadata)} cluster frames")
+        # Count frame types for logging
+        cluster_count = sum(1 for f in all_frames_metadata if f.get('frame_type') == 'cluster')
+        single_count = sum(1 for f in all_frames_metadata if f.get('frame_type') == 'single')
+        logger.info(f"✅ Extracted {len(all_frames_metadata)} total frames ({cluster_count} cluster, {single_count} single)")
         logger.info(f"   Saved metadata to: {metadata_path}")
 
     def _run_pass3_qa_generation(self):
@@ -1734,11 +1774,12 @@ class AdversarialSmartPipeline:
         # Convert moments to Phase 5-like format for Phase 8
         phase5_compatible = self._convert_moments_to_phase5_format(all_moments)
 
-        # ✅ FIX: Extract cluster frames before QA generation
+        # ✅ FIX: Extract cluster frames AND single frames before QA generation
         dense_clusters = phase5_compatible.get('dense_clusters', [])
-        if dense_clusters:
-            logger.info(f"Extracting frames for {len(dense_clusters)} clusters...")
-            self._extract_cluster_frames(dense_clusters)
+        single_frames = phase5_compatible.get('selection_plan', [])
+        if dense_clusters or single_frames:
+            logger.info(f"Extracting frames for {len(dense_clusters)} clusters and {len(single_frames)} single frames...")
+            self._extract_cluster_frames(dense_clusters, single_frames)
 
         frames_dir = self.output_dir / "frames" / self.video_id
 
