@@ -308,6 +308,35 @@ class AdversarialSmartPipeline:
         logger.info("SCANNING FOR CHECKPOINTS (Pass 1-2B Architecture)")
         logger.info("=" * 80)
 
+        # DETECT AND DELETE OLD ARCHITECTURE CHECKPOINTS
+        checkpoint_paths = self._get_checkpoint_paths()
+
+        # Check if we have old architecture (Phase 1 exists but no PASS 2A/2B)
+        phase1_exists = checkpoint_paths["phase1"].exists()
+        pass2a_exists = checkpoint_paths["pass2a"].exists()
+        pass2b_exists = checkpoint_paths["pass2b"].exists()
+        clip_analysis_exists = checkpoint_paths["clip_analysis"].exists()
+
+        if phase1_exists and not (pass2a_exists or pass2b_exists or clip_analysis_exists):
+            logger.warning("⚠️  OLD ARCHITECTURE CHECKPOINTS DETECTED!")
+            logger.warning("   Phase 1 exists but PASS 2A/2B/CLIP checkpoints missing")
+            logger.warning("   → Deleting all old checkpoints and forcing fresh processing")
+
+            # Delete all JSON files in output directory (old checkpoints)
+            deleted_count = 0
+            for json_file in self.output_dir.glob("*.json"):
+                try:
+                    json_file.unlink()
+                    logger.info(f"   ✓ Deleted: {json_file.name}")
+                    deleted_count += 1
+                except Exception as e:
+                    logger.warning(f"   ✗ Failed to delete {json_file.name}: {e}")
+
+            logger.info(f"   ✅ Deleted {deleted_count} old checkpoint files")
+            logger.info("   → Starting fresh with new PASS 2A/2B architecture")
+            logger.info("=" * 80 + "\n")
+            return 1
+
         checkpoint_paths = self._get_checkpoint_paths()
 
         # Define required fields for each checkpoint (Pass 1-2B Architecture)
