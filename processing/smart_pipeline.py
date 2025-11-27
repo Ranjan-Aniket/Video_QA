@@ -193,7 +193,7 @@ class AdversarialSmartPipeline:
 
         # API keys
         self.openai_api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
-        self.claude_api_key = claude_api_key or os.getenv("CLAUDE_API_KEY")
+        self.claude_api_key = claude_api_key or os.getenv("ANTHROPIC_API_KEY")
         self.gemini_api_key = gemini_api_key or os.getenv("GEMINI_API_KEY")
 
         # Initialize API clients (lazy loading)
@@ -1792,7 +1792,7 @@ def test_adversarial_pipeline(video_path: str):
     pipeline = AdversarialSmartPipeline(
         video_path=video_path,
         openai_api_key=os.getenv("OPENAI_API_KEY"),
-        claude_api_key=os.getenv("CLAUDE_API_KEY")
+        claude_api_key=os.getenv("ANTHROPIC_API_KEY")
     )
 
     results = pipeline.run_full_pipeline()
@@ -1826,5 +1826,5 @@ if __name__ == "__main__":
         print("Usage: python smart_pipeline.py <video_path>")
         print("\nExample:")
         print("  export OPENAI_API_KEY=your_key_here")
-        print("  export CLAUDE_API_KEY=your_key_here  # Optional, for cross-validation")
+        print("  export ANTHROPIC_API_KEY=your_key_here  # Optional, for cross-validation")
         print("  python smart_pipeline.py my_video.mp4")

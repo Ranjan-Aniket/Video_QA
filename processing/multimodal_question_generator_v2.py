@@ -2132,7 +2132,7 @@ class MultimodalQuestionGeneratorV2:
         else:
             raise ValueError("OpenAI API key required")
         
-        self.claude_api_key = claude_api_key or os.getenv("CLAUDE_API_KEY")
+        self.claude_api_key = claude_api_key or os.getenv("ANTHROPIC_API_KEY")
         if not self.claude_api_key:
             raise ValueError("Claude API key required for Sonnet 4.5")
 
