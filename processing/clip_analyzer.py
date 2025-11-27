@@ -78,7 +78,8 @@ class CLIPAnalyzer:
         self,
         model_name: str = "ViT-L/14",
         use_siglip: bool = False,
-        device: Optional[str] = None
+        device: Optional[str] = None,
+        batch_size: int = 32
     ):
         """
         Initialize CLIP analyzer
@@ -87,6 +88,7 @@ class CLIPAnalyzer:
             model_name: CLIP model name (ViT-B/32, ViT-L/14, etc.)
             use_siglip: Use SigLIP instead of CLIP (better text-image alignment)
             device: torch device (cpu, cuda, mps)
+            batch_size: Batch size for processing (default: 32)
         """
         # Auto-detect best device: CUDA (NVIDIA) > MPS (Apple Silicon) > CPU
         if device:
@@ -103,6 +105,7 @@ class CLIPAnalyzer:
 
         self.model_name = model_name
         self.use_siglip = use_siglip
+        self.batch_size = batch_size
 
         # Load model
         if use_siglip and OPEN_CLIP_AVAILABLE:
@@ -183,6 +186,53 @@ class CLIPAnalyzer:
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
 
         return image_features.cpu().numpy()[0]
+
+    def encode_images_batch(self, images: List[np.ndarray]) -> np.ndarray:
+        """
+        Encode multiple images to CLIP embeddings (BATCH PROCESSING)
+
+        Args:
+            images: List of OpenCV images (BGR)
+
+        Returns:
+            Array of normalized embedding vectors (shape: [N, embedding_dim])
+        """
+        all_embeddings = []
+
+        # Process in batches
+        for batch_start in range(0, len(images), self.batch_size):
+            batch_end = min(batch_start + self.batch_size, len(images))
+            batch_images = images[batch_start:batch_end]
+
+            # Convert and preprocess batch
+            batch_tensors = []
+            for image in batch_images:
+                # Convert BGR to RGB
+                image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                pil_image = Image.fromarray(image_rgb)
+
+                # Preprocess
+                image_tensor = self.preprocess(pil_image)
+                batch_tensors.append(image_tensor)
+
+            # Stack into batch
+            batch_tensor = torch.stack(batch_tensors).to(self.device)
+
+            # Encode batch
+            with torch.no_grad():
+                if self.use_siglip and OPEN_CLIP_AVAILABLE:
+                    batch_features = self.model.encode_image(batch_tensor)
+                else:
+                    batch_features = self.model.encode_image(batch_tensor)
+
+            # Normalize
+            batch_features = batch_features / batch_features.norm(dim=-1, keepdim=True)
+
+            # Add to results
+            all_embeddings.append(batch_features.cpu().numpy())
+
+        # Concatenate all batches
+        return np.concatenate(all_embeddings, axis=0)
 
     def encode_text(self, text: str) -> np.ndarray:
         """

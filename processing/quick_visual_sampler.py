@@ -42,7 +42,7 @@ class QuickVisualSampler:
         """Load all FREE models"""
         try:
             # Import all processors
-            from .clip_processor import CLIPProcessor
+            from .clip_analyzer import CLIPAnalyzer  # Use batch processor
             from .places365_processor import Places365Processor
             from .object_detector import ObjectDetector
             from .ocr_processor import OCRProcessor
@@ -69,10 +69,10 @@ class QuickVisualSampler:
                 logger.info("⚠️  BLIP-2 enabled - expect 2+ hours for Phase 2")
             else:
                 self.blip2 = None
-                logger.info("✓ BLIP-2 disabled - Phase 2 will be ~15 minutes instead of 2+ hours")
+                logger.info("✓ BLIP-2 disabled - Phase 2 will be ~5 minutes with batch processing")
 
             # Load models with auto-detected device
-            self.clip = CLIPProcessor(device=device)
+            self.clip = CLIPAnalyzer(device=device, batch_size=32)  # BATCH PROCESSING
             self.places365 = Places365Processor()  # CPU only (no GPU support)
             self.yolo = ObjectDetector(device=device)
             self.ocr = OCRProcessor()  # GPU enabled in ocr_processor.py if available
@@ -139,14 +139,18 @@ class QuickVisualSampler:
         skipped_count = 0
 
         if mode == "fps":
-            # FPS Mode: Extract frames at uniform FPS rate
-            logger.info(f"Sampling at {fps_rate} FPS with FREE models...")
+            # FPS Mode: Extract frames at uniform FPS rate (with BATCH CLIP processing)
+            logger.info(f"Sampling at {fps_rate} FPS with FREE models (BATCH PROCESSING)...")
 
             # Calculate timestamps
             interval = 1.0 / fps_rate
             timestamps = np.arange(0, video_duration, interval)
 
-            logger.info(f"Will extract ~{len(timestamps)} frames")
+            logger.info(f"Will extract ~{len(timestamps)} frames (processing in batches of 32)")
+
+            # Step 1: Extract all frames and metadata
+            frame_batch = []
+            frame_metadata = []
 
             for i, timestamp in enumerate(timestamps):
                 # Extract frame
@@ -170,12 +174,29 @@ class QuickVisualSampler:
                     frame_path = frames_dir / frame_filename
                     cv2.imwrite(str(frame_path), frame)
 
-                # Run all FREE models on this frame
-                analysis = self._analyze_frame(frame, timestamp, frame_num, frame_path)
-                samples.append(analysis)
+                # Add to batch
+                frame_batch.append(frame)
+                frame_metadata.append({
+                    'timestamp': timestamp,
+                    'frame_num': frame_num,
+                    'frame_path': frame_path,
+                    'quality': quality
+                })
 
-                if len(samples) % 100 == 0:
-                    logger.info(f"Processed {len(samples)}/{len(timestamps)} frames...")
+                # Process batch when we have 32 frames
+                if len(frame_batch) == 32:
+                    batch_samples = self._analyze_frame_batch(frame_batch, frame_metadata)
+                    samples.extend(batch_samples)
+                    frame_batch = []
+                    frame_metadata = []
+
+                    if len(samples) % 100 == 0:
+                        logger.info(f"Processed {len(samples)}/{len(timestamps)} frames...")
+
+            # Process remaining frames in batch
+            if len(frame_batch) > 0:
+                batch_samples = self._analyze_frame_batch(frame_batch, frame_metadata)
+                samples.extend(batch_samples)
 
         else:
             # Scene Mode: 1 frame per scene (original behavior)
@@ -226,51 +247,78 @@ class QuickVisualSampler:
             'skipped_low_quality': skipped_count
         }
     
+    def _analyze_frame_batch(self, frames: List, metadata: List[Dict]) -> List[Dict]:
+        """
+        Run all FREE models on a batch of frames (OPTIMIZED for batch CLIP processing)
+
+        Args:
+            frames: List of frame images
+            metadata: List of metadata dicts for each frame
+
+        Returns:
+            List of analysis results for each frame
+        """
+        # Step 1: BATCH CLIP processing (32 frames at once on GPU)
+        clip_embeddings = self.clip.encode_images_batch(frames)
+
+        # Step 2: Process other models individually (they don't benefit from batching)
+        results = []
+        for i, (frame, meta) in enumerate(zip(frames, metadata)):
+            timestamp = meta['timestamp']
+            frame_num = meta['frame_num']
+            frame_path = meta['frame_path']
+
+            # BLIP-2: Generate caption (OPTIONAL - very slow!)
+            blip2_caption = None
+            if self.blip2:
+                blip2_caption = self.blip2.generate_caption(frame)
+
+            # CLIP embedding (already computed in batch above)
+            clip_embedding = clip_embeddings[i]
+
+            # Places365: Classify scene
+            scene_result = self.places365.classify_scene(frame)
+
+            # YOLO: Detect objects (JIT)
+            object_result = self.yolo.detect_objects_jit(frame, timestamp)
+
+            # OCR: DISABLED - Vision models (Claude/GPT-4o) will detect text in Phase 8
+            ocr_result = {'text_blocks': [], 'block_count': 0}
+
+            # Pose: Detect human poses
+            pose_result = self.pose.detect_pose(frame)
+
+            # FER: Detect emotions (optional)
+            emotions = []
+            if self.fer:
+                emotions = self.fer.detect_emotions(frame)
+
+            results.append({
+                'frame_id': frame_num,
+                'frame_path': str(frame_path) if frame_path else None,
+                'timestamp': timestamp,
+                'blip2_caption': blip2_caption,
+                'clip_embedding': clip_embedding.tolist() if clip_embedding is not None else [],
+                'scene_type': scene_result.scene_category,
+                'objects': [obj.to_dict() for obj in object_result.detections],
+                'text_detected': ocr_result.get('all_text', '') if isinstance(ocr_result, dict) else ocr_result.all_text,
+                'poses': pose_result.to_dict() if pose_result else {},
+                'emotions': emotions,
+                'quality': meta['quality']
+            })
+
+        return results
+
     def _analyze_frame(self, frame, timestamp: float, frame_num: int, frame_path: Path = None) -> Dict:
-        """Run all FREE models on single frame"""
+        """Run all FREE models on single frame (for scene mode)"""
 
-        # 1. BLIP-2: Generate caption (OPTIONAL - very slow!)
-        blip2_caption = None
-        if self.blip2:
-            blip2_caption = self.blip2.generate_caption(frame)
-
-        # 2. CLIP: Extract embeddings + attributes
-        clip_embedding = self.clip.encode_image(frame)
-
-        # 3. Places365: Classify scene
-        scene_result = self.places365.classify_scene(frame)
-
-        # 4. YOLO: Detect objects (JIT)
-        object_result = self.yolo.detect_objects_jit(frame, timestamp)
-
-        # 5. OCR: DISABLED - Vision models (Claude/GPT-4o) will detect text in Phase 8
-        # No need for redundant OCR processing - saves 20+ minutes per video
-        ocr_result = {'text_blocks': [], 'block_count': 0}  # Skip OCR entirely
-
-        # 6. Pose: Detect human poses
-        pose_result = self.pose.detect_pose(frame)
-
-        # 7. FER: Detect emotions (optional)
-        emotions = []
-        if self.fer:
-            emotions = self.fer.detect_emotions(frame)
-
-        # 8. Quality assessment
-        quality = self._assess_quality(frame)
-
-        return {
-            'frame_id': frame_num,  # Critical for Pass 2A to find the frame file
-            'frame_path': str(frame_path) if frame_path else None,
+        # Use batch processing with single frame
+        return self._analyze_frame_batch([frame], [{
             'timestamp': timestamp,
-            'blip2_caption': blip2_caption,
-            'clip_embedding': clip_embedding.tolist() if clip_embedding is not None else [],
-            'scene_type': scene_result.scene_category,
-            'objects': [obj.to_dict() for obj in object_result.detections],
-            'text_detected': ocr_result.get('all_text', '') if isinstance(ocr_result, dict) else ocr_result.all_text,
-            'poses': pose_result.to_dict() if pose_result else {},
-            'emotions': emotions,
-            'quality': quality
-        }
+            'frame_num': frame_num,
+            'frame_path': frame_path,
+            'quality': self._assess_quality(frame)
+        }])[0]
     
     def _assess_quality(self, frame) -> float:
         """Quick quality assessment"""
