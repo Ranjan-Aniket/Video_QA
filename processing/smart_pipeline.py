@@ -1786,6 +1786,12 @@ class AdversarialSmartPipeline:
         with open(pass3_path, 'w', encoding='utf-8') as f:
             json.dump(convert_numpy_types(output_data), f, indent=2, ensure_ascii=False)
 
+        # ✅ FIX: Also save as *_questions.json for frontend API compatibility
+        # Frontend API expects *_questions.json but we save as *_pass3_qa_pairs.json
+        questions_path = self.output_dir / f"{self.video_id}_questions.json"
+        with open(questions_path, 'w', encoding='utf-8') as f:
+            json.dump(convert_numpy_types(output_data), f, indent=2, ensure_ascii=False)
+
         # Track cost
         pass3_cost = result['cost_summary']['total_cost']
         self.total_cost += pass3_cost
