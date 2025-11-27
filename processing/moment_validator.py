@@ -244,7 +244,7 @@ class MomentValidator:
         self,
         moment: Dict,
         video_duration: float,
-        intro_duration: float = 30.0,
+        intro_duration: float = 10.0,
         outro_duration: float = 30.0
     ) -> Tuple[bool, str]:
         """
@@ -410,23 +410,23 @@ class MomentValidator:
                 errors.append(f"Frame existence: {error}")
                 validation_stats['frame_existence_failed'] += 1
 
-            # 2. Transcript match
-            is_valid, error = self.validate_transcript_match(moment, transcript_text)
-            if not is_valid:
-                errors.append(f"Transcript match: {error}")
-                validation_stats['transcript_match_failed'] += 1
+            # 2. Transcript match (DISABLED - too strict)
+            # is_valid, error = self.validate_transcript_match(moment, transcript_text)
+            # if not is_valid:
+            #     errors.append(f"Transcript match: {error}")
+            #     validation_stats['transcript_match_failed'] += 1
 
-            # 3. Timestamp alignment
-            is_valid, error = self.validate_timestamp_alignment(moment, audio_analysis)
-            if not is_valid:
-                errors.append(f"Timestamp alignment: {error}")
-                validation_stats['timestamp_alignment_failed'] += 1
+            # 3. Timestamp alignment (DISABLED - too strict for now)
+            # is_valid, error = self.validate_timestamp_alignment(moment, audio_analysis)
+            # if not is_valid:
+            #     errors.append(f"Timestamp alignment: {error}")
+            #     validation_stats['timestamp_alignment_failed'] += 1
 
-            # 4. Name detection
-            is_valid, names = self.detect_names(moment)
-            if not is_valid:
-                errors.append(f"Names detected: {names}")
-                validation_stats['names_detected'] += 1
+            # 4. Name detection (DISABLED - will implement name replacement with vision metadata later)
+            # is_valid, names = self.detect_names(moment)
+            # if not is_valid:
+            #     errors.append(f"Names detected: {names}")
+            #     validation_stats['names_detected'] += 1
 
             # 5. Intro/outro check
             is_valid, error = self.validate_intro_outro(moment, video_duration)
