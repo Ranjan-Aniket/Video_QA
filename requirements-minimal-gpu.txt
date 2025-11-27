@@ -1,0 +1,55 @@
+# ============================================================================
+# MINIMAL GPU REQUIREMENTS - Only Essential Packages
+# For RunPod/AWS GPU deployment
+# ============================================================================
+
+# -------------------- LLM APIs --------------------
+anthropic>=0.39.0
+openai>=1.54.0
+
+# -------------------- Deep Learning Core --------------------
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
+
+# -------------------- Vision Models --------------------
+transformers>=4.30.0  # BLIP-2, CLIP
+pillow>=10.0.0
+opencv-python>=4.8.0
+
+# -------------------- Object Detection --------------------
+ultralytics>=8.0.0  # YOLO
+
+# -------------------- OCR --------------------
+easyocr>=1.7.0
+
+# -------------------- Pose Detection --------------------
+mediapipe>=0.10.0
+
+# -------------------- Audio (Whisper) --------------------
+openai-whisper>=20231117
+# OR use faster-whisper (pick one):
+# faster-whisper>=1.0.0
+
+# -------------------- Web Framework --------------------
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# -------------------- Database --------------------
+sqlalchemy>=2.0.0
+alembic>=1.12.0
+
+# -------------------- NLP --------------------
+spacy>=3.7.0
+# Download model: python -m spacy download en_core_web_sm
+
+# -------------------- Utilities --------------------
+loguru>=0.7.0
+python-dotenv>=1.0.0
+numpy>=1.24.0
+scikit-learn>=1.3.0  # For clustering, metrics
+
+# -------------------- Optional --------------------
+# fuzzywuzzy>=0.18.0  # For fuzzy string matching (optional)
+# python-Levenshtein>=0.21.0  # Faster fuzzy matching (optional)
