@@ -26,6 +26,68 @@ class Pass1SmartFilter:
         """Initialize Pass 1 filter"""
         self.client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
+        # ✅ PROMPT CACHING: Build cacheable system prompt once (reused across ALL videos)
+        self._cached_system_prompt = None  # Will be built on first use
+
+    def _build_cached_system_prompt(self) -> str:
+        """
+        Build CACHEABLE system prompt with all static guidelines.
+        This will be reused across ALL videos.
+
+        Returns:
+            System prompt string
+        """
+        return """You are analyzing video metadata to select high-potential frames for adversarial Q&A generation.
+
+TASK: Select UP TO {budget} frames that have the highest potential for creating adversarial questions.
+
+PRIORITIZE frames that show:
+
+1. INFERENCE CANDIDATES (25 frames):
+   - Transcript mentions causality: "because", "why", "the reason", "due to"
+   - Transcript mentions intent: "to", "in order to", "want to"
+   - Frames where cause/effect might be visible
+
+2. COMPARISON CANDIDATES (25 frames):
+   - Transcript mentions change: "before", "after", "changed", "became", "now"
+   - Transcript mentions differences: "but", "however", "instead", "different"
+   - Frames where state changes might be visible
+
+3. HIGH-DENSITY MOMENTS (20 frames):
+   - Multiple speakers in quick succession
+   - Rapid dialogue (many short utterances)
+   - Complex scenes (high object count)
+   - Multiple simultaneous events
+
+4. CLIP ANOMALIES (10 frames):
+   - High CLIP ontology scores (especially for inference, comparative, needle)
+   - Frames that stand out visually
+
+CONSTRAINTS:
+- Only select frames from the provided candidate list
+- Stay within budget of {budget} frames
+- Avoid consecutive frames (spread selections across video)
+- Prioritize diversity of ontology types
+
+OUTPUT FORMAT:
+Return ONLY a JSON array of selected frame IDs with reasons. Do NOT wrap in markdown code blocks.
+
+[
+  {{
+    "frame_id": 123,
+    "timestamp": 45.2,
+    "category": "inference",
+    "reason": "Transcript says 'because' at 45.1s, frame shows action result"
+  }},
+  ...
+]
+
+IMPORTANT:
+- Return ONLY the JSON array, no explanatory text before or after
+- Do NOT use markdown code blocks (no ``` markers)
+- Select UP TO {budget} frames
+- Focus on quality over quantity - it's okay to select fewer than {budget} if candidates are weak"""
+
     def tier1_auto_keep(
         self,
         frames: List[Dict],
@@ -240,15 +302,28 @@ class Pass1SmartFilter:
             clip_analysis
         )
 
-        # Call Sonnet 4.5
-        prompt = self._build_tier3_prompt(metadata_summary, budget)
+        # ✅ PROMPT CACHING: Build system prompt once (lazy init), then format with budget
+        if self._cached_system_prompt is None:
+            self._cached_system_prompt = self._build_cached_system_prompt()
+
+        # Format system prompt with budget
+        system_prompt = self._cached_system_prompt.format(budget=budget)
+
+        # Build dynamic user prompt (metadata only)
+        user_prompt = metadata_summary
 
         try:
+            # ✅ PROMPT CACHING: Use system messages with cache_control
             response = self.client.messages.create(
                 model="claude-sonnet-4-5-20250929",
                 max_tokens=4000,
+                system=[{
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"}
+                }],
                 messages=[
-                    {"role": "user", "content": prompt}
+                    {"role": "user", "content": user_prompt}
                 ]
             )
 

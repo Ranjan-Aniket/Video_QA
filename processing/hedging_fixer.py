@@ -36,6 +36,78 @@ class HedgingFixer:
         self.fix_count = 0
         self.total_cost = 0.0
 
+        # ✅ PROMPT CACHING: Build cacheable system prompt once (reused across ALL questions)
+        self._cached_system_prompt = self._build_cached_system_prompt()
+
+    def _build_cached_system_prompt(self) -> str:
+        """
+        Build CACHEABLE system prompt with all static guidelines.
+        This will be reused across ALL questions.
+
+        Returns:
+            System prompt string
+        """
+        return """You are fixing quality issues in video Q&A questions.
+
+**YOUR TASK:**
+Rewrite the question and answer to fix ALL quality issues.
+
+**FIXING RULES:**
+
+1. **Remove ALL hedging language** - Use DEFINITIVE statements:
+   ❌ "appears to be" → ✅ "is"
+   ❌ "seems to show" → ✅ "shows"
+   ❌ "could be" → ✅ "is"
+   ❌ "suggests that" → ✅ "shows that" or "demonstrates that"
+
+2. **Remove ALL pronouns** - Use specific descriptors:
+   ❌ "he is wearing" → ✅ "the person is wearing"
+   ❌ "she picks up" → ✅ "the individual picks up"
+   ❌ "they are positioned" → ✅ "the objects are positioned"
+   ❌ "his hand" → ✅ "the person's hand"
+   ❌ "their position" → ✅ "the figures' position"
+
+3. **Remove ALL proper names** - Use generic descriptors:
+   ❌ "John throws" → ✅ "the person throws"
+   ❌ "Sarah's action" → ✅ "the individual's action"
+   ❌ "Lakers jersey" → ✅ "the basketball team's jersey"
+   ❌ "Nike logo" → ✅ "the brand logo"
+   ❌ "LEGO model" → ✅ "the construction toy model"
+   ❌ "Mario jumps" → ✅ "the character jumps"
+
+4. **Preserve everything else:**
+   - Keep the same meaning and information
+   - Use the same question type
+   - Maintain similar length
+   - DO NOT change: timestamps, audio_cue, visual_cue, confidence, question_type
+   - ONLY fix the "question" and "golden_answer" fields
+
+**EXAMPLES:**
+
+❌ BAD: "The visual shows he appears to be holding a tool"
+✅ GOOD: "The visual shows the person is holding a tool"
+
+❌ BAD: "What does her action suggest about the scene?"
+✅ GOOD: "What does the person's action demonstrate about the scene?"
+
+❌ BAD: "They seem to be positioned near the edge"
+✅ GOOD: "The objects are positioned near the edge"
+
+❌ BAD: "When does Mario jump in the video?"
+✅ GOOD: "When does the character jump in the video?"
+
+❌ BAD: "What is John wearing in this scene?"
+✅ GOOD: "What is the person wearing in this scene?"
+
+**OUTPUT FORMAT:**
+Return ONLY a JSON object with the fixed question and answer:
+{{
+  "question": "Fixed question text here",
+  "golden_answer": "Fixed answer text here"
+}}
+
+Return valid JSON only, no other text."""
+
     def fix_quality_issues(
         self,
         questions: List[Dict],
@@ -212,9 +284,8 @@ class HedgingFixer:
 
         problem_text = "\n\n".join(problems)
 
-        prompt = f"""You are fixing quality issues in a video Q&A question.
-
-**ORIGINAL QUESTION:**
+        # Build dynamic user prompt (question-specific data only)
+        user_prompt = f"""**ORIGINAL QUESTION:**
 {question.get('question', '')}
 
 **ORIGINAL ANSWER:**
@@ -223,70 +294,19 @@ class HedgingFixer:
 **PROBLEMS DETECTED:**
 {problem_text}
 
-**YOUR TASK:**
-Rewrite the question and answer to fix ALL quality issues.
+**QUESTION TYPE:** {question.get('question_type', '')}"""
 
-**FIXING RULES:**
-
-1. **Remove ALL hedging language** - Use DEFINITIVE statements:
-   ❌ "appears to be" → ✅ "is"
-   ❌ "seems to show" → ✅ "shows"
-   ❌ "could be" → ✅ "is"
-   ❌ "suggests that" → ✅ "shows that" or "demonstrates that"
-
-2. **Remove ALL pronouns** - Use specific descriptors:
-   ❌ "he is wearing" → ✅ "the person is wearing"
-   ❌ "she picks up" → ✅ "the individual picks up"
-   ❌ "they are positioned" → ✅ "the objects are positioned"
-   ❌ "his hand" → ✅ "the person's hand"
-   ❌ "their position" → ✅ "the figures' position"
-
-3. **Remove ALL proper names** - Use generic descriptors:
-   ❌ "John throws" → ✅ "the person throws"
-   ❌ "Sarah's action" → ✅ "the individual's action"
-   ❌ "Lakers jersey" → ✅ "the basketball team's jersey"
-   ❌ "Nike logo" → ✅ "the brand logo"
-   ❌ "LEGO model" → ✅ "the construction toy model"
-   ❌ "Mario jumps" → ✅ "the character jumps"
-
-4. **Preserve everything else:**
-   - Keep the same meaning and information
-   - Use the same question type: {question.get('question_type', '')}
-   - Maintain similar length
-   - DO NOT change: timestamps, audio_cue, visual_cue, confidence, question_type
-   - ONLY fix the "question" and "golden_answer" fields
-
-**EXAMPLES:**
-
-❌ BAD: "The visual shows he appears to be holding a tool"
-✅ GOOD: "The visual shows the person is holding a tool"
-
-❌ BAD: "What does her action suggest about the scene?"
-✅ GOOD: "What does the person's action demonstrate about the scene?"
-
-❌ BAD: "They seem to be positioned near the edge"
-✅ GOOD: "The objects are positioned near the edge"
-
-❌ BAD: "When does Mario jump in the video?"
-✅ GOOD: "When does the character jump in the video?"
-
-❌ BAD: "What is John wearing in this scene?"
-✅ GOOD: "What is the person wearing in this scene?"
-
-**OUTPUT FORMAT:**
-Return ONLY a JSON object with the fixed question and answer:
-{{
-  "question": "Fixed question text here",
-  "golden_answer": "Fixed answer text here"
-}}
-
-Return valid JSON only, no other text."""
-
+        # ✅ PROMPT CACHING: Use system messages with cache_control
         response = self.client.messages.create(
             model=self.model,
             max_tokens=500,
             temperature=0,
-            messages=[{"role": "user", "content": prompt}]
+            system=[{
+                "type": "text",
+                "text": self._cached_system_prompt,
+                "cache_control": {"type": "ephemeral"}
+            }],
+            messages=[{"role": "user", "content": user_prompt}]
         )
 
         # Parse response

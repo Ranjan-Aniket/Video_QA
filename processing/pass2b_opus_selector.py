@@ -47,6 +47,9 @@ class Pass2BOpusSelector:
         self.client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
         self.model = "claude-opus-4-20250514"
 
+        # ✅ PROMPT CACHING: Build cacheable system prompt once (reused across ALL videos)
+        self._cached_system_prompt = None  # Will be built on first use
+
         # ✅ FIXED: Hard ontology definitions (using official type names from ontology_types.py)
         self.ontology_definitions = {
             "Inference": """
@@ -134,6 +137,266 @@ Counter-intuitive pairings where obvious interpretation is WRONG.
                 "error": "Frame is too dark or has no visual content for Tackling Spurious Correlations question"
             },
         }
+
+    def _build_cached_system_prompt(self) -> str:
+        """
+        Build CACHEABLE system prompt with all static guidelines.
+        This will be reused across ALL videos (90% cost reduction on guidelines).
+
+        Returns:
+            System prompt string
+        """
+        return f"""You are performing deep multimodal reasoning to identify challenging adversarial moments.
+
+TASK: Analyze frames for 4 HARD ontology types requiring sophisticated reasoning:
+
+{json.dumps(self.ontology_definitions, indent=2)}
+
+=== DEEP REASONING INSTRUCTIONS ===
+
+For INFERENCE moments:
+- Look for actions where the WHY is not stated in audio
+- Identify visual cues that reveal purpose/intent/causality
+- Consider: Would a naive viewer understand why this happened?
+- The ANSWER should be inferable from visuals but not obvious
+
+For HOLISTIC moments:
+- Identify patterns that span the full video
+- Look for recurring visual elements or themes
+- Consider structural patterns (e.g., format, transitions)
+- Requires synthesizing information from distant parts
+
+For AVSTITCHING moments:
+- Analyze scene transitions and cuts
+- Ask: Why did the editor cut HERE?
+- How do scenes before/after relate semantically?
+- What does this edit convey beyond individual scenes?
+
+═══════════════════════════════════════════════════════════════
+SPURIOUS CORRELATION: CONCRETE DETECTION CRITERIA
+═══════════════════════════════════════════════════════════════
+
+Flag as SPURIOUS if moment meets ANY of these criteria:
+
+1. SEMANTIC MISMATCH:
+   • Audio says "happy" but visual shows sad expression
+   • Audio describes "fast" but visual shows slow movement
+   • Audio references object X but visual shows object Y
+   Example: "Audio mentions 'red ball' but only blue ball visible"
+
+2. MISLEADING COINCIDENCE:
+   • Audio event aligns with unrelated visual event by chance
+   • Timing suggests causation but there's none
+   • Similar sounds from different sources confuse relationship
+   Example: "Door slam audio coincides with unrelated hand gesture"
+
+3. EXPECTATION VIOLATION:
+   • Normal interpretation leads to wrong conclusion
+   • Context suggests one thing, reality is another
+   • Common assumption would be incorrect
+   Example: "Audio says 'turn left' but person turns right"
+
+CONFIDENCE THRESHOLD:
+• < 0.75: Too uncertain, DO NOT flag as spurious
+• 0.75-0.85: Flag with detailed reasoning
+• > 0.85: Strong spurious candidate, prioritize
+
+SPURIOUS REQUIRES:
+- Clear evidence of mismatch or misleading relationship
+- High confidence (≥ 0.75) that it will trick Gemini
+- Specific explanation of WHY it's spurious
+
+═══════════════════════════════════════════════════════════════
+AUDIO-VISUAL STITCHING: 4-STEP DECISION TREE
+═══════════════════════════════════════════════════════════════
+
+Ask these questions IN ORDER. Stop at first "NO":
+
+┌─────────────────────────────────────────────────────────────┐
+│ STEP 1: Does audio provide SEMANTIC anchor (not just timing)? │
+├─────────────────────────────────────────────────────────────┤
+│ ✓ SEMANTIC: "narrator says 'watch the ball'" (describes)  │
+│ ✗ TEMPORAL: "audio peak at 2:30" (timing only)            │
+│                                                             │
+│ If NO → NOT AV Stitching (stop here)                       │
+└─────────────────────────────────────────────────────────────┘
+                           ↓ YES
+┌─────────────────────────────────────────────────────────────┐
+│ STEP 2: Does visual show what audio REFERENCES?            │
+├─────────────────────────────────────────────────────────────┤
+│ ✓ MATCH: Audio "red car" + Visual shows red car            │
+│ ✗ MISMATCH: Audio "red car" + Visual shows blue car        │
+│                                                             │
+│ If NO → NOT AV Stitching (stop here)                       │
+└─────────────────────────────────────────────────────────────┘
+                           ↓ YES
+┌─────────────────────────────────────────────────────────────┐
+│ STEP 3: Would answering require BOTH modalities?           │
+├─────────────────────────────────────────────────────────────┤
+│ • Can answer with visual alone? → NOT AV Stitching         │
+│ • Can answer with audio alone? → NOT AV Stitching          │
+│                                                             │
+│ If either YES → NOT AV Stitching (stop here)               │
+└─────────────────────────────────────────────────────────────┘
+                           ↓ NO (both needed)
+┌─────────────────────────────────────────────────────────────┐
+│ STEP 4: Is connection MEANING-BASED (not coincidental)?    │
+├─────────────────────────────────────────────────────────────┤
+│ ✓ MEANING: Speech describes visible action                 │
+│ ✗ COINCIDENCE: Music happens during unrelated action       │
+│                                                             │
+│ If NO → NOT AV Stitching (stop here)                       │
+└─────────────────────────────────────────────────────────────┘
+                           ↓ YES
+                    ✅ ASSIGN AV STITCHING
+
+=== CRITICAL CUE QUALITY GUIDELINES ===
+
+❌ NO HEDGING LANGUAGE in visual_cues or audio_cues:
+- FORBIDDEN: "appears to", "seems to", "looks like", "could be", "may be", "might be"
+- FORBIDDEN: "suggests", "likely", "probably", "possibly"
+- USE DEFINITIVE LANGUAGE: "shows", "displays", "contains", "indicates", "demonstrates"
+
+Examples:
+✗ BAD: "The action appears to cause an effect"
+✓ GOOD: "Action causes effect"
+✗ BAD: "Speaker seems uncertain"
+✓ GOOD: "Speaker pauses before answering"
+
+❌ NO PRONOUNS in visual_cues or audio_cues:
+- FORBIDDEN: "he", "she", "him", "her", "his", "hers", "they", "them", "their"
+- USE DESCRIPTORS: "person", "speaker", "individual", "figure", "woman", "man"
+
+❌ NO PROPER NAMES in visual_cues or audio_cues:
+- FORBIDDEN: Person names, brand names, team names, character names
+- USE GENERIC DESCRIPTORS: "person", "speaker", "brand logo", "team", "character"
+
+═══════════════════════════════════════════════════════════════════════════════
+MINIMUM TEMPORAL WINDOWS BY QUESTION TYPE (CRITICAL)
+═══════════════════════════════════════════════════════════════════════════════
+
+Each question type requires a MINIMUM temporal window (protected_window span):
+
+SIMPLE OBSERVATION (10-15s minimum):
+• Needle: 10s
+• Counting: 10s
+• Referential Grounding: 10s
+
+MODERATE COMPLEXITY (20-25s minimum):
+• Audio-Visual Stitching: 20s
+• Context: 20s
+• General Holistic Reasoning: 20s
+• Inference: 20s
+
+HIGH COMPLEXITY (30-40s minimum):
+• Sequential: 30s
+• Temporal Understanding: 30s
+• Subscene: 30s
+• Object Interaction Reasoning: 30s
+
+VERY HIGH COMPLEXITY (40-60s minimum):
+• Comparative: 40s
+• Tackling Spurious Correlations: 40s
+
+⚠️ VALIDATION: protected_window.start to protected_window.end MUST span ≥ minimum for primary_ontology.
+
+Example for Sequential:
+✓ VALID: {{"start": 10.0, "end": 42.0}}  // 32s span ≥ 30s minimum
+✗ INVALID: {{"start": 10.0, "end": 25.0}}  // 15s span < 30s minimum → REJECT
+
+Example for Audio-Visual Stitching:
+✓ VALID: {{"start": 5.0, "end": 28.0}}  // 23s span ≥ 20s minimum
+✗ INVALID: {{"start": 5.0, "end": 18.0}}  // 13s span < 20s minimum → REJECT
+
+=== AUDIO MODALITY DIVERSITY ===
+
+Selected moments should use at least 2 different audio modalities:
+1. SPEECH: Dialogue, narration, words, phrases
+2. MUSIC: Tempo, tone, melody, starts/stops
+3. SOUND EFFECTS: Impacts, whooshes, mechanical sounds, clicks
+4. SILENCE: Pauses, gaps, scene boundaries
+
+This ensures audio-visual diversity and prevents speech-only moments.
+
+=== HALLUCINATION PREVENTION ===
+
+FORBIDDEN HALLUCINATIONS (will be rejected):
+✗ NO inventing interactions that don't exist in the video
+✗ NO inventing object states/orientations not visible in frames
+✗ NO inventing progression/causality not shown
+✗ NO inventing audio content not in transcript
+✗ NO assuming actions before/after the visible window
+✗ NO inferring emotions/intentions without visual evidence
+
+ONLY describe what is DIRECTLY OBSERVABLE in:
+- The provided frames (visual)
+- The provided transcript segments (audio)
+
+For INFERENCE type specifically:
+- The QUESTION should ask about unstated WHY/PURPOSE
+- The ANSWER must be inferable from visible evidence
+- But DON'T hallucinate details not present in frames
+
+=== OUTPUT FORMAT ===
+
+For each detected moment, provide:
+
+{{
+  "frame_ids": [123, 124],
+  "timestamps": [45.2, 45.7],
+  "mode": "inference_window",  // or cluster
+  "duration": 10.0,
+  "visual_cues": ["Person picks up hammer", "Examines nail", "Sets hammer down without using it"],
+  "audio_cues": ["Speaker says 'I realized something was wrong'"],
+  "correspondence": "Audio provides context but doesn't explain WHY hammer wasn't used - must infer from visual sequence",
+  "primary_ontology": "Inference",
+  "secondary_ontologies": ["Temporal"],
+  "adversarial_features": [
+    "Requires inferring unstated reason (nail already hammered)",
+    "Audio provides misdirection (focuses on realization, not the action)",
+    "Easy to miss visual detail (nail state)"
+  ],
+  "priority": 0.90,
+  "protected_window": {{
+    "start": 43.2,
+    "end": 47.2,
+    "radius": 2.0
+  }},
+  "frame_extraction": {{
+    "method": "keyframe_sample",
+    "frames": [44.0, 45.2, 46.5],
+    "anchor": 45.2
+  }},
+  "confidence": 0.85,
+  "reasoning": "Detailed explanation of why this is adversarial and what makes it challenging"
+}}
+
+=== MODE GUIDELINES FOR HARD TYPES ===
+
+- Inference: Usually "inference_window" (8-12s) - need setup + action
+- Holistic: Always "cluster" (20-30s) - spans multiple scenes
+- AVStitching: "inference_window" or "cluster" depending on cut span
+- Spurious: Usually "inference_window" (8-12s) - need context for mismatch
+
+=== QUALITY OVER QUANTITY ===
+
+- Generate 8-15 moments total (focus on truly challenging cases)
+- Each moment should genuinely require deep reasoning
+- Don't force moments if evidence is weak
+- Spurious is the hardest - only flag if you're confident in the mismatch
+
+Return JSON:
+{{
+  "moments": [array of moment objects],
+  "reasoning_notes": {{
+    "inference_rationale": "Why these moments require inference...",
+    "holistic_patterns": "What patterns were found...",
+    "avstitching_insights": "Key editing choices...",
+    "spurious_analysis": "Mismatches detected..."
+  }}
+}}
+
+Begin deep analysis. Use your full reasoning capabilities - these are the hardest moments in the video."""
 
     def encode_frame(self, frame_path: str) -> str:
         """Encode frame to base64"""
@@ -381,7 +644,8 @@ Counter-intuitive pairings where obvious interpretation is WRONG.
         full_video_context: Dict
     ) -> str:
         """
-        Build comprehensive prompt for Opus 4
+        Build DYNAMIC user prompt for Opus 4 (video-specific data only).
+        Static guidelines are in system prompt with caching.
 
         Args:
             frames: Prepared frames
@@ -391,15 +655,9 @@ Counter-intuitive pairings where obvious interpretation is WRONG.
             full_video_context: Context from earlier phases (scenes, themes, etc.)
 
         Returns:
-            Prompt string
+            Dynamic prompt string with video-specific data
         """
-        prompt = f"""You are performing deep multimodal reasoning to identify challenging adversarial moments.
-
-TASK: Analyze frames for 4 HARD ontology types requiring sophisticated reasoning:
-
-{json.dumps(self.ontology_definitions, indent=2)}
-
-=== FRAMES FLAGGED BY PASS 2A ===
+        prompt = f"""=== FRAMES FLAGGED BY PASS 2A ===
 
 Sonnet 4.5 flagged these for deeper analysis:
 
@@ -452,255 +710,7 @@ CLIP detected potential semantic mismatches:
                 prompt += f", OCR='{ocr[:50]}'"
             prompt += "\n"
 
-        prompt += f"""
-
-=== DEEP REASONING INSTRUCTIONS ===
-
-For INFERENCE moments:
-- Look for actions where the WHY is not stated in audio
-- Identify visual cues that reveal purpose/intent/causality
-- Consider: Would a naive viewer understand why this happened?
-- The ANSWER should be inferable from visuals but not obvious
-
-For HOLISTIC moments:
-- Identify patterns that span the full video
-- Look for recurring visual elements or themes
-- Consider structural patterns (e.g., format, transitions)
-- Requires synthesizing information from distant parts
-
-For AVSTITCHING moments:
-- Analyze scene transitions and cuts
-- Ask: Why did the editor cut HERE?
-- How do scenes before/after relate semantically?
-- What does this edit convey beyond individual scenes?
-
-═══════════════════════════════════════════════════════════════
-SPURIOUS CORRELATION: CONCRETE DETECTION CRITERIA
-═══════════════════════════════════════════════════════════════
-
-Flag as SPURIOUS if moment meets ANY of these criteria:
-
-1. SEMANTIC MISMATCH:
-   • Audio says "happy" but visual shows sad expression
-   • Audio describes "fast" but visual shows slow movement
-   • Audio references object X but visual shows object Y
-   Example: "Audio mentions 'red ball' but only blue ball visible"
-
-2. MISLEADING COINCIDENCE:
-   • Audio event aligns with unrelated visual event by chance
-   • Timing suggests causation but there's none
-   • Similar sounds from different sources confuse relationship
-   Example: "Door slam audio coincides with unrelated hand gesture"
-
-3. EXPECTATION VIOLATION:
-   • Normal interpretation leads to wrong conclusion
-   • Context suggests one thing, reality is another
-   • Common assumption would be incorrect
-   Example: "Audio says 'turn left' but person turns right"
-
-CONFIDENCE THRESHOLD:
-• < 0.75: Too uncertain, DO NOT flag as spurious
-• 0.75-0.85: Flag with detailed reasoning
-• > 0.85: Strong spurious candidate, prioritize
-
-SPURIOUS REQUIRES:
-- Clear evidence of mismatch or misleading relationship
-- High confidence (≥ 0.75) that it will trick Gemini
-- Specific explanation of WHY it's spurious
-
-═══════════════════════════════════════════════════════════════
-AUDIO-VISUAL STITCHING: 4-STEP DECISION TREE
-═══════════════════════════════════════════════════════════════
-
-Ask these questions IN ORDER. Stop at first "NO":
-
-┌─────────────────────────────────────────────────────────────┐
-│ STEP 1: Does audio provide SEMANTIC anchor (not just timing)? │
-├─────────────────────────────────────────────────────────────┤
-│ ✓ SEMANTIC: "narrator says 'watch the ball'" (describes)  │
-│ ✗ TEMPORAL: "audio peak at 2:30" (timing only)            │
-│                                                             │
-│ If NO → NOT AV Stitching (stop here)                       │
-└─────────────────────────────────────────────────────────────┘
-                           ↓ YES
-┌─────────────────────────────────────────────────────────────┐
-│ STEP 2: Does visual show what audio REFERENCES?            │
-├─────────────────────────────────────────────────────────────┤
-│ ✓ MATCH: Audio "red car" + Visual shows red car            │
-│ ✗ MISMATCH: Audio "red car" + Visual shows blue car        │
-│                                                             │
-│ If NO → NOT AV Stitching (stop here)                       │
-└─────────────────────────────────────────────────────────────┘
-                           ↓ YES
-┌─────────────────────────────────────────────────────────────┐
-│ STEP 3: Would answering require BOTH modalities?           │
-├─────────────────────────────────────────────────────────────┤
-│ • Can answer with visual alone? → NOT AV Stitching         │
-│ • Can answer with audio alone? → NOT AV Stitching          │
-│                                                             │
-│ If either YES → NOT AV Stitching (stop here)               │
-└─────────────────────────────────────────────────────────────┘
-                           ↓ NO (both needed)
-┌─────────────────────────────────────────────────────────────┐
-│ STEP 4: Is connection MEANING-BASED (not coincidental)?    │
-├─────────────────────────────────────────────────────────────┤
-│ ✓ MEANING: Speech describes visible action                 │
-│ ✗ COINCIDENCE: Music happens during unrelated action       │
-│                                                             │
-│ If NO → NOT AV Stitching (stop here)                       │
-└─────────────────────────────────────────────────────────────┘
-                           ↓ YES
-                    ✅ ASSIGN AV STITCHING
-
-=== CRITICAL CUE QUALITY GUIDELINES ===
-
-❌ NO HEDGING LANGUAGE in visual_cues or audio_cues:
-- FORBIDDEN: "appears to", "seems to", "looks like", "could be", "may be", "might be"
-- FORBIDDEN: "suggests", "likely", "probably", "possibly"
-- USE DEFINITIVE LANGUAGE: "shows", "displays", "contains", "indicates", "demonstrates"
-
-Examples:
-✗ BAD: "The action appears to cause an effect"
-✓ GOOD: "Action causes effect"
-✗ BAD: "Speaker seems uncertain"
-✓ GOOD: "Speaker pauses before answering"
-
-❌ NO PRONOUNS in visual_cues or audio_cues:
-- FORBIDDEN: "he", "she", "him", "her", "his", "hers", "they", "them", "their"
-- USE DESCRIPTORS: "person", "speaker", "individual", "figure", "woman", "man"
-
-❌ NO PROPER NAMES in visual_cues or audio_cues:
-- FORBIDDEN: Person names, brand names, team names, character names
-- USE GENERIC DESCRIPTORS: "person", "speaker", "brand logo", "team", "character"
-
-═══════════════════════════════════════════════════════════════════════════════
-MINIMUM TEMPORAL WINDOWS BY QUESTION TYPE (CRITICAL)
-═══════════════════════════════════════════════════════════════════════════════
-
-Each question type requires a MINIMUM temporal window (protected_window span):
-
-SIMPLE OBSERVATION (10-15s minimum):
-• Needle: 10s
-• Counting: 10s
-• Referential Grounding: 10s
-
-MODERATE COMPLEXITY (20-25s minimum):
-• Audio-Visual Stitching: 20s
-• Context: 20s
-• General Holistic Reasoning: 20s
-• Inference: 20s
-
-HIGH COMPLEXITY (30-40s minimum):
-• Sequential: 30s
-• Temporal Understanding: 30s
-• Subscene: 30s
-• Object Interaction Reasoning: 30s
-
-VERY HIGH COMPLEXITY (40-60s minimum):
-• Comparative: 40s
-• Tackling Spurious Correlations: 40s
-
-⚠️ VALIDATION: protected_window.start to protected_window.end MUST span ≥ minimum for primary_ontology.
-
-Example for Sequential:
-✓ VALID: {{"start": 10.0, "end": 42.0}}  // 32s span ≥ 30s minimum
-✗ INVALID: {{"start": 10.0, "end": 25.0}}  // 15s span < 30s minimum → REJECT
-
-Example for Audio-Visual Stitching:
-✓ VALID: {{"start": 5.0, "end": 28.0}}  // 23s span ≥ 20s minimum
-✗ INVALID: {{"start": 5.0, "end": 18.0}}  // 13s span < 20s minimum → REJECT
-
-=== AUDIO MODALITY DIVERSITY ===
-
-Selected moments should use at least 2 different audio modalities:
-1. SPEECH: Dialogue, narration, words, phrases
-2. MUSIC: Tempo, tone, melody, starts/stops
-3. SOUND EFFECTS: Impacts, whooshes, mechanical sounds, clicks
-4. SILENCE: Pauses, gaps, scene boundaries
-
-This ensures audio-visual diversity and prevents speech-only moments.
-
-=== HALLUCINATION PREVENTION ===
-
-FORBIDDEN HALLUCINATIONS (will be rejected):
-✗ NO inventing interactions that don't exist in the video
-✗ NO inventing object states/orientations not visible in frames
-✗ NO inventing progression/causality not shown
-✗ NO inventing audio content not in transcript
-✗ NO assuming actions before/after the visible window
-✗ NO inferring emotions/intentions without visual evidence
-
-ONLY describe what is DIRECTLY OBSERVABLE in:
-- The provided frames (visual)
-- The provided transcript segments (audio)
-
-For INFERENCE type specifically:
-- The QUESTION should ask about unstated WHY/PURPOSE
-- The ANSWER must be inferable from visible evidence
-- But DON'T hallucinate details not present in frames
-
-=== OUTPUT FORMAT ===
-
-For each detected moment, provide:
-
-{{
-  "frame_ids": [123, 124],
-  "timestamps": [45.2, 45.7],
-  "mode": "inference_window",  // or cluster
-  "duration": 10.0,
-  "visual_cues": ["Person picks up hammer", "Examines nail", "Sets hammer down without using it"],
-  "audio_cues": ["Speaker says 'I realized something was wrong'"],
-  "correspondence": "Audio provides context but doesn't explain WHY hammer wasn't used - must infer from visual sequence",
-  "primary_ontology": "Inference",
-  "secondary_ontologies": ["Temporal"],
-  "adversarial_features": [
-    "Requires inferring unstated reason (nail already hammered)",
-    "Audio provides misdirection (focuses on realization, not the action)",
-    "Easy to miss visual detail (nail state)"
-  ],
-  "priority": 0.90,
-  "protected_window": {{
-    "start": 43.2,
-    "end": 47.2,
-    "radius": 2.0
-  }},
-  "frame_extraction": {{
-    "method": "keyframe_sample",
-    "frames": [44.0, 45.2, 46.5],
-    "anchor": 45.2
-  }},
-  "confidence": 0.85,
-  "reasoning": "Detailed explanation of why this is adversarial and what makes it challenging"
-}}
-
-=== MODE GUIDELINES FOR HARD TYPES ===
-
-- Inference: Usually "inference_window" (8-12s) - need setup + action
-- Holistic: Always "cluster" (20-30s) - spans multiple scenes
-- AVStitching: "inference_window" or "cluster" depending on cut span
-- Spurious: Usually "inference_window" (8-12s) - need context for mismatch
-
-=== QUALITY OVER QUANTITY ===
-
-- Generate 8-15 moments total (focus on truly challenging cases)
-- Each moment should genuinely require deep reasoning
-- Don't force moments if evidence is weak
-- Spurious is the hardest - only flag if you're confident in the mismatch
-
-Return JSON:
-{{
-  "moments": [array of moment objects],
-  "reasoning_notes": {{
-    "inference_rationale": "Why these moments require inference...",
-    "holistic_patterns": "What patterns were found...",
-    "avstitching_insights": "Key editing choices...",
-    "spurious_analysis": "Mismatches detected..."
-  }}
-}}
-
-Begin deep analysis. Use your full reasoning capabilities - these are the hardest moments in the video.
-"""
-
+        # Static guidelines are now in system prompt with caching
         return prompt
 
     def call_opus_4(
@@ -726,8 +736,12 @@ Begin deep analysis. Use your full reasoning capabilities - these are the hardes
         """
         logger.info(f"Calling Opus 4 with {len(frames)} frames for deep reasoning...")
 
-        # Build prompt
-        prompt = self.build_prompt(
+        # ✅ PROMPT CACHING: Build system prompt once (lazy init)
+        if self._cached_system_prompt is None:
+            self._cached_system_prompt = self._build_cached_system_prompt()
+
+        # Build dynamic user prompt (video-specific data)
+        dynamic_prompt = self.build_prompt(
             frames,
             flagged_frames,
             spurious_candidates,
@@ -735,13 +749,13 @@ Begin deep analysis. Use your full reasoning capabilities - these are the hardes
             full_video_context
         )
 
-        # Build content (text + images)
-        content = [{"type": "text", "text": prompt}]
+        # Build user content (dynamic text + images)
+        user_content = [{"type": "text", "text": dynamic_prompt}]
 
         # Add images
         for frame in frames[:30]:  # Limit to 30 images for Opus 4
             if 'image_base64' in frame:
-                content.append({
+                user_content.append({
                     "type": "image",
                     "source": {
                         "type": "base64",
@@ -751,13 +765,18 @@ Begin deep analysis. Use your full reasoning capabilities - these are the hardes
                 })
 
         try:
-            # ✅ FIX: Wrap API call with retry logic
+            # ✅ PROMPT CACHING: Use system messages with cache_control
             def make_api_call():
                 return self.client.messages.create(
                     model=self.model,
                     max_tokens=8000,
+                    system=[{
+                        "type": "text",
+                        "text": self._cached_system_prompt,
+                        "cache_control": {"type": "ephemeral"}
+                    }],
                     messages=[
-                        {"role": "user", "content": content}
+                        {"role": "user", "content": user_content}
                     ]
                 )
 

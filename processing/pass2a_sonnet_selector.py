@@ -76,6 +76,9 @@ class Pass2ASonnetSelector:
         self.client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
         self.model = "claude-sonnet-4-5-20250929"
 
+        # ✅ PROMPT CACHING: Build cacheable system prompt once (reused across ALL videos)
+        self._cached_system_prompt = None  # Will be built on first use
+
         # Ontology definitions (✅ FIXED: Using official type names from ontology_types.py)
         self.ontology_definitions = {
             "Needle": "Small details - OCR text, brief graphics, specific numbers, badges, small objects",
@@ -217,162 +220,15 @@ class Pass2ASonnetSelector:
         # Minimum temporal windows by question type (P0 Critical Bug Fix #2)
         # ✅ FIXED: Now importing from centralized ontology_types.py instead of defining locally
 
-    def validate_frame_for_ontology(self, frame: dict, ontology_type: str) -> tuple[bool, str]:
+    def _build_cached_system_prompt(self) -> str:
         """
-        Validate frame has required content for ontology type (P0 Critical Issue #2).
-
-        Args:
-            frame: Frame metadata dict
-            ontology_type: Ontology type (e.g., "Needle", "Counting")
+        Build CACHEABLE system prompt with all static guidelines.
+        This will be reused across ALL videos (~90% of prompt tokens).
 
         Returns:
-            (is_valid, error_message)
+            System prompt string
         """
-        requirement = self.frame_requirements.get(ontology_type)
-
-        if requirement is None:
-            return True, ""  # No special requirements for this type
-
-        try:
-            if not requirement['check'](frame):
-                return False, requirement['error']
-        except Exception as e:
-            logger.warning(f"Frame validation error for {ontology_type}: {e}")
-            return True, ""  # Allow if check fails (graceful degradation)
-
-        return True, ""
-
-    def validate_temporal_window_for_type(self, moment: dict) -> tuple[bool, str]:
-        """
-        Validate temporal window meets minimum for question type (P0 Critical Bug Fix #2).
-
-        Args:
-            moment: Moment dict with protected_window and primary_ontology
-
-        Returns:
-            (is_valid, error_message)
-        """
-        # ✅ FIXED: Use shared validation module (eliminates duplication with Pass 2B)
-        return validate_temporal_window_for_type(moment)
-
-    def validate_moment_duration(self, moment: dict) -> tuple[bool, str]:
-        """
-        Validate moment duration matches mode requirements (P1 High Issue #3).
-
-        Args:
-            moment: Moment dict with 'mode' and 'duration' fields
-
-        Returns:
-            (is_valid, error_message)
-        """
-        # ✅ FIXED: Use shared validation module (eliminates duplication with Pass 2B)
-        return validate_moment_duration(moment, self.mode_duration_ranges)
-
-    def validate_cue_quality(self, moment: dict) -> tuple[bool, list[str]]:
-        """
-        Validate visual_cues and audio_cues for quality issues (P1 High Issue #4).
-
-        Checks for:
-        - Hedging language (appears, seems, possibly, etc.)
-        - Pronouns (he, she, they, etc.)
-
-        Args:
-            moment: Moment dict with 'visual_cues' and 'audio_cues' fields
-
-        Returns:
-            (is_valid, list of issues found)
-        """
-        # ✅ FIXED: Use shared validation module (eliminates duplication with Pass 2B)
-        return validate_cue_quality(moment, self.hedging_patterns, self.pronoun_patterns)
-
-    def validate_protected_radius(self, moment: dict) -> tuple[bool, str]:
-        """
-        Validate protected window radius matches mode (P2 Medium Issue #6).
-
-        Args:
-            moment: Moment dict with 'mode' and 'protected_window' fields
-
-        Returns:
-            (is_valid, error_message)
-        """
-        # ✅ FIXED: Use shared validation module (eliminates duplication with Pass 2B)
-        return validate_protected_radius(moment, self.protected_radii)
-
-    def encode_frame(self, frame_path: str) -> str:
-        """
-        Encode frame to base64 for Claude Vision API
-
-        Args:
-            frame_path: Path to frame image
-
-        Returns:
-            Base64 encoded image
-        """
-        with open(frame_path, 'rb') as f:
-            return base64.b64encode(f.read()).decode('utf-8')
-
-    def prepare_frames_for_api(
-        self,
-        selected_frames: List[Dict],
-        frames_dir: Path
-    ) -> List[Dict]:
-        """
-        Prepare frame images for Claude Vision API
-
-        Args:
-            selected_frames: Frame metadata from Pass 1
-            frames_dir: Directory containing extracted frames
-
-        Returns:
-            List of dicts with frame metadata + base64 images
-        """
-        prepared_frames = []
-
-        for frame in selected_frames:
-            frame_id = frame['frame_id']
-            timestamp = frame['timestamp']
-
-            # ✅ FIX BUG-004: Handle both integer and string frame_ids
-            # Integer frame_ids: format as frame_000123.jpg
-            # String frame_ids: use as-is (e.g., "single_001.jpg")
-            if isinstance(frame_id, int):
-                frame_file = frames_dir / f"frame_{frame_id:06d}.jpg"
-            else:
-                # String frame_id - use directly (may already have .jpg extension)
-                frame_file = frames_dir / (f"{frame_id}.jpg" if not frame_id.endswith('.jpg') else frame_id)
-
-            if not frame_file.exists():
-                logger.warning(f"Frame file not found: {frame_file}")
-                continue
-
-            # Encode frame
-            frame_b64 = self.encode_frame(str(frame_file))
-
-            prepared_frames.append({
-                **frame,
-                'image_base64': frame_b64
-            })
-
-        return prepared_frames
-
-    def build_prompt(
-        self,
-        frames: List[Dict],
-        audio_analysis: Dict,
-        clip_analysis: Dict
-    ) -> str:
-        """
-        Build comprehensive prompt for Sonnet 4.5
-
-        Args:
-            frames: Selected frames with metadata
-            audio_analysis: Audio analysis results
-            clip_analysis: CLIP analysis results
-
-        Returns:
-            Prompt string
-        """
-        prompt = f"""You are analyzing video frames to identify moments for adversarial Q&A generation.
+        return f"""You are analyzing video frames to identify moments for adversarial Q&A generation.
 
 TASK: Identify moments for the following 9 ontology types:
 
@@ -381,46 +237,6 @@ TASK: Identify moments for the following 9 ontology types:
 ALSO ATTEMPT (flag if uncertain):
 - Inference: Unstated cause/purpose/intent (flag if confidence < 0.7)
 - AVStitching: Editing intent (flag if unclear)
-
-=== AUDIO TRANSCRIPT (with timestamps) ===
-
-"""
-        # Add transcript
-        if 'segments' in audio_analysis:
-            for seg in audio_analysis['segments'][:100]:  # Limit for context
-                prompt += f"[{seg['start']:.1f}s] {seg.get('speaker', 'SPEAKER')}: {seg['text']}\n"
-
-        prompt += f"""
-
-=== FRAME METADATA ===
-
-Total frames in this batch: {len(frames)}
-
-"""
-        # Add frame metadata (images will be sent separately in content blocks)
-        for i, frame in enumerate(frames):  # Process all frames in batch
-            frame_id = frame['frame_id']
-            ts = frame['timestamp']
-            scene = frame.get('scene_type', 'unknown')
-            ocr = frame.get('text_detected', '')
-            obj_count = len(frame.get('objects', []))
-
-            # ✅ ISSUE #1 FIX: Include CLIP ontology scores for moment prioritization
-            ontology_scores = clip_analysis.get('ontology_scores', {}).get(frame_id, {})
-            if ontology_scores:
-                top_ontology = max(ontology_scores, key=ontology_scores.get)
-                top_score = ontology_scores[top_ontology]
-                clip_info = f", CLIP: {top_ontology}={top_score:.2f}"
-            else:
-                clip_info = ""
-
-            prompt += f"Frame {i+1}: ID={frame_id}, time={ts:.1f}s, scene={scene}, objects={obj_count}"
-            if ocr:
-                prompt += f", OCR='{ocr[:50]}'"
-            prompt += clip_info
-            prompt += "\n"
-
-        prompt += f"""
 
 === 3-MODE FRAMEWORK ===
 
@@ -572,47 +388,207 @@ ONLY describe what is DIRECTLY OBSERVABLE in:
 === SPECIAL CASES ===
 
 - If OCR text detected → ALWAYS create Mode 1 precise moment
-- If scene transition → Consider Mode 1 or Mode 2 to capture transition
-- If speech-gesture sync → Mode 1 Referential moment
-- If extended action sequence (15+ seconds) → Mode 4 cluster
+- If counting opportunity (3+ identical objects) → Create Mode 1 moment
+- If before/after pattern → Flag for Opus 4 (Comparative)
+- If semantic mismatch → Flag for Opus 4 (Spurious)
 
-=== CONSTRAINTS ===
+Return JSON with moments and flagged_for_opus4 array."""
 
-- Generate 25-35 moments total
-- Ensure diversity across all 9 ontology types
-- Avoid selecting consecutive frames for different moments
-- Protected windows must not overlap (except Mode 4 can encompass others)
+    def validate_frame_for_ontology(self, frame: dict, ontology_type: str) -> tuple[bool, str]:
+        """
+        Validate frame has required content for ontology type (P0 Critical Issue #2).
 
-=== FLAGS FOR OPUS 4 ===
+        Args:
+            frame: Frame metadata dict
+            ontology_type: Ontology type (e.g., "Needle", "Counting")
 
-If you encounter moments where:
-- Inference is needed but cause/purpose is unclear → flag for Opus 4
-- Editing intent for AVStitching is ambiguous → flag for Opus 4
-- Counter-intuitive pairing (audio says X, visual shows Y) → flag for Opus 4
+        Returns:
+            (is_valid, error_message)
+        """
+        requirement = self.frame_requirements.get(ontology_type)
 
-Output these separately in "flagged_for_opus4" array.
+        if requirement is None:
+            return True, ""  # No special requirements for this type
 
-Return JSON with structure:
-{{
-  "moments": [array of moment objects],
-  "flagged_for_opus4": [
-    {{
-      "frame_ids": [456],
-      "timestamps": [67.8],
-      "reason": "Unclear inference - why did person do X?",
-      "suggested_ontology": "Inference"
-    }}
-  ],
-  "coverage": {{
-    "Needle": 3,
-    "Counting": 2,
-    ...
-  }}
-}}
+        try:
+            if not requirement['check'](frame):
+                return False, requirement['error']
+        except Exception as e:
+            logger.warning(f"Frame validation error for {ontology_type}: {e}")
+            return True, ""  # Allow if check fails (graceful degradation)
 
-Begin analysis. Focus on quality over quantity - prioritize truly adversarial moments.
+        return True, ""
+
+    def validate_temporal_window_for_type(self, moment: dict) -> tuple[bool, str]:
+        """
+        Validate temporal window meets minimum for question type (P0 Critical Bug Fix #2).
+
+        Args:
+            moment: Moment dict with protected_window and primary_ontology
+
+        Returns:
+            (is_valid, error_message)
+        """
+        # ✅ FIXED: Use shared validation module (eliminates duplication with Pass 2B)
+        return validate_temporal_window_for_type(moment)
+
+    def validate_moment_duration(self, moment: dict) -> tuple[bool, str]:
+        """
+        Validate moment duration matches mode requirements (P1 High Issue #3).
+
+        Args:
+            moment: Moment dict with 'mode' and 'duration' fields
+
+        Returns:
+            (is_valid, error_message)
+        """
+        # ✅ FIXED: Use shared validation module (eliminates duplication with Pass 2B)
+        return validate_moment_duration(moment, self.mode_duration_ranges)
+
+    def validate_cue_quality(self, moment: dict) -> tuple[bool, list[str]]:
+        """
+        Validate visual_cues and audio_cues for quality issues (P1 High Issue #4).
+
+        Checks for:
+        - Hedging language (appears, seems, possibly, etc.)
+        - Pronouns (he, she, they, etc.)
+
+        Args:
+            moment: Moment dict with 'visual_cues' and 'audio_cues' fields
+
+        Returns:
+            (is_valid, list of issues found)
+        """
+        # ✅ FIXED: Use shared validation module (eliminates duplication with Pass 2B)
+        return validate_cue_quality(moment, self.hedging_patterns, self.pronoun_patterns)
+
+    def validate_protected_radius(self, moment: dict) -> tuple[bool, str]:
+        """
+        Validate protected window radius matches mode (P2 Medium Issue #6).
+
+        Args:
+            moment: Moment dict with 'mode' and 'protected_window' fields
+
+        Returns:
+            (is_valid, error_message)
+        """
+        # ✅ FIXED: Use shared validation module (eliminates duplication with Pass 2B)
+        return validate_protected_radius(moment, self.protected_radii)
+
+    def encode_frame(self, frame_path: str) -> str:
+        """
+        Encode frame to base64 for Claude Vision API
+
+        Args:
+            frame_path: Path to frame image
+
+        Returns:
+            Base64 encoded image
+        """
+        with open(frame_path, 'rb') as f:
+            return base64.b64encode(f.read()).decode('utf-8')
+
+    def prepare_frames_for_api(
+        self,
+        selected_frames: List[Dict],
+        frames_dir: Path
+    ) -> List[Dict]:
+        """
+        Prepare frame images for Claude Vision API
+
+        Args:
+            selected_frames: Frame metadata from Pass 1
+            frames_dir: Directory containing extracted frames
+
+        Returns:
+            List of dicts with frame metadata + base64 images
+        """
+        prepared_frames = []
+
+        for frame in selected_frames:
+            frame_id = frame['frame_id']
+            timestamp = frame['timestamp']
+
+            # ✅ FIX BUG-004: Handle both integer and string frame_ids
+            # Integer frame_ids: format as frame_000123.jpg
+            # String frame_ids: use as-is (e.g., "single_001.jpg")
+            if isinstance(frame_id, int):
+                frame_file = frames_dir / f"frame_{frame_id:06d}.jpg"
+            else:
+                # String frame_id - use directly (may already have .jpg extension)
+                frame_file = frames_dir / (f"{frame_id}.jpg" if not frame_id.endswith('.jpg') else frame_id)
+
+            if not frame_file.exists():
+                logger.warning(f"Frame file not found: {frame_file}")
+                continue
+
+            # Encode frame
+            frame_b64 = self.encode_frame(str(frame_file))
+
+            prepared_frames.append({
+                **frame,
+                'image_base64': frame_b64
+            })
+
+        return prepared_frames
+
+    def build_prompt(
+        self,
+        frames: List[Dict],
+        audio_analysis: Dict,
+        clip_analysis: Dict
+    ) -> str:
+        """
+        Build DYNAMIC user prompt for Sonnet 4.5 (video-specific data only).
+        Static guidelines are in system prompt with caching.
+
+        Args:
+            frames: Selected frames with metadata
+            audio_analysis: Audio analysis results
+            clip_analysis: CLIP analysis results
+
+        Returns:
+            Dynamic prompt string with video-specific data
+        """
+        prompt = f"""=== AUDIO TRANSCRIPT (with timestamps) ===
+
 """
+        # Add transcript
+        if 'segments' in audio_analysis:
+            for seg in audio_analysis['segments'][:100]:  # Limit for context
+                prompt += f"[{seg['start']:.1f}s] {seg.get('speaker', 'SPEAKER')}: {seg['text']}\n"
 
+        prompt += f"""
+
+=== FRAME METADATA ===
+
+Total frames in this batch: {len(frames)}
+
+"""
+        # Add frame metadata (images will be sent separately in content blocks)
+        for i, frame in enumerate(frames):  # Process all frames in batch
+            frame_id = frame['frame_id']
+            ts = frame['timestamp']
+            scene = frame.get('scene_type', 'unknown')
+            ocr = frame.get('text_detected', '')
+            obj_count = len(frame.get('objects', []))
+
+            # ✅ ISSUE #1 FIX: Include CLIP ontology scores for moment prioritization
+            ontology_scores = clip_analysis.get('ontology_scores', {}).get(frame_id, {})
+            if ontology_scores:
+                top_ontology = max(ontology_scores, key=ontology_scores.get)
+                top_score = ontology_scores[top_ontology]
+                clip_info = f", CLIP: {top_ontology}={top_score:.2f}"
+            else:
+                clip_info = ""
+
+            prompt += f"Frame {i+1}: ID={frame_id}, time={ts:.1f}s, scene={scene}, objects={obj_count}"
+            if ocr:
+                prompt += f", OCR='{ocr[:50]}'"
+            prompt += clip_info
+            prompt += "\n"
+
+        # Static guidelines are now in system prompt with caching
         return prompt
 
     def call_sonnet_45(
@@ -634,16 +610,20 @@ Begin analysis. Focus on quality over quantity - prioritize truly adversarial mo
         """
         logger.info(f"Calling Sonnet 4.5 with {len(frames)} frames...")
 
-        # Build prompt
-        prompt = self.build_prompt(frames, audio_analysis, clip_analysis)
+        # ✅ PROMPT CACHING: Build system prompt once (lazy init)
+        if self._cached_system_prompt is None:
+            self._cached_system_prompt = self._build_cached_system_prompt()
 
-        # Build content blocks (text + images)
-        content = [{"type": "text", "text": prompt}]
+        # Build dynamic user prompt (video-specific data)
+        dynamic_prompt = self.build_prompt(frames, audio_analysis, clip_analysis)
+
+        # Build user content blocks (dynamic text + images)
+        user_content = [{"type": "text", "text": dynamic_prompt}]
 
         # Add all frame images in this batch (batching handled by caller)
         for frame in frames:
             if 'image_base64' in frame:
-                content.append({
+                user_content.append({
                     "type": "image",
                     "source": {
                         "type": "base64",
@@ -653,11 +633,17 @@ Begin analysis. Focus on quality over quantity - prioritize truly adversarial mo
                 })
 
         try:
+            # ✅ PROMPT CACHING: Use system messages with cache_control
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=8000,
+                system=[{
+                    "type": "text",
+                    "text": self._cached_system_prompt,
+                    "cache_control": {"type": "ephemeral"}
+                }],
                 messages=[
-                    {"role": "user", "content": content}
+                    {"role": "user", "content": user_content}
                 ]
             )
 
