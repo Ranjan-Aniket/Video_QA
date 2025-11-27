@@ -1581,8 +1581,9 @@ class AdversarialSmartPipeline:
             secondary_types = [normalize_type(t) for t in moment.get('secondary_ontologies', [])]
             question_types = [primary_type] + secondary_types
 
-            if mode == 'cluster' or len(frame_ids) >= 3:
-                # Treat as cluster
+            if mode == 'cluster' or len(frame_ids) >= 5:
+                # Treat as cluster (5+ frames)
+                # Allow 2-4 frame bursts to be single frames for better distribution
                 dense_clusters.append({
                     'start': min(timestamps) if timestamps else 0,
                     'end': max(timestamps) if timestamps else 0,
