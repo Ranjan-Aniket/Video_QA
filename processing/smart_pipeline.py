@@ -1379,7 +1379,7 @@ class AdversarialSmartPipeline:
             frames_metadata=self.visual_samples,
             transcript_segments=transcript_segments,
             output_path=str(clip_path),
-            use_siglip=True  # Use SigLIP for better alignment
+            use_siglip=False  # Use regular CLIP (no HF auth required)
         )
 
         phase_time = (datetime.now() - phase_start).total_seconds()

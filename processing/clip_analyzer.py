@@ -656,7 +656,7 @@ def run_clip_analysis(
     frames_metadata: List[Dict],
     transcript_segments: List[Dict],
     output_path: str,
-    use_siglip: bool = True
+    use_siglip: bool = False
 ) -> Dict:
     """
     Run full CLIP analysis pipeline
@@ -666,7 +666,7 @@ def run_clip_analysis(
         frames_metadata: List of frame metadata dicts
         transcript_segments: List of transcript segment dicts
         output_path: Path to save results
-        use_siglip: Use SigLIP instead of CLIP
+        use_siglip: Use SigLIP instead of CLIP (requires HF auth)
 
     Returns:
         Analysis results dict
