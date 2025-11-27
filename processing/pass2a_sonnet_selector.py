@@ -560,6 +560,49 @@ Return JSON with moments and flagged_for_opus4 array."""
 
         prompt += f"""
 
+=== AUDIO EVENTS (non-speech) ===
+
+"""
+        # Add audio events (music, sound effects, crowd sounds, music changes)
+        audio_events = audio_analysis.get('audio_events', [])
+        if audio_events:
+            # Group by type for better organization
+            music_events = [e for e in audio_events if e['type'] == 'background_music']
+            sound_effects = [e for e in audio_events if e['type'] == 'sound_effect']
+            crowd_sounds = [e for e in audio_events if e['type'] == 'crowd_sound']
+            music_changes = [e for e in audio_events if e['type'] == 'music_change']
+
+            if music_events:
+                prompt += "MUSIC:\n"
+                for event in music_events[:20]:  # Limit to avoid context bloat
+                    prompt += f"  [{event['start']:.1f}s-{event['end']:.1f}s] {event['subtype']} music"
+                    if 'characteristics' in event:
+                        tempo = event['characteristics'].get('tempo')
+                        if tempo:
+                            prompt += f" (tempo: {tempo:.0f} BPM)"
+                    prompt += "\n"
+
+            if sound_effects:
+                prompt += "SOUND EFFECTS:\n"
+                for event in sound_effects[:20]:
+                    prompt += f"  [{event['start']:.1f}s] {event['subtype']} (intensity: {event['characteristics'].get('intensity', 'unknown')})\n"
+
+            if crowd_sounds:
+                prompt += "CROWD SOUNDS:\n"
+                for event in crowd_sounds[:10]:
+                    prompt += f"  [{event['start']:.1f}s-{event['end']:.1f}s] {event['subtype']} (intensity: {event['characteristics'].get('intensity', 'unknown')})\n"
+
+            if music_changes:
+                prompt += "MUSIC CHANGES:\n"
+                for event in music_changes[:10]:
+                    before = event['characteristics'].get('before_tempo', 0)
+                    after = event['characteristics'].get('after_tempo', 0)
+                    prompt += f"  [{event['start']:.1f}s] {event['subtype']} ({before:.0f}→{after:.0f} BPM)\n"
+        else:
+            prompt += "(No non-speech audio events detected)\n"
+
+        prompt += f"""
+
 === FRAME METADATA ===
 
 Total frames in this batch: {len(frames)}
