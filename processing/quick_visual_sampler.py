@@ -15,6 +15,9 @@ import logging
 from pathlib import Path
 from typing import Dict, List
 import json
+import subprocess
+import tempfile
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +35,99 @@ class QuickVisualSampler:
         self.enable_blip2 = enable_blip2
         self.models_loaded = True  # No models needed anymore
         logger.info("QuickVisualSampler initialized (frame extraction only)")
-    
+
+    def _check_and_reencode_if_needed(self, video_path: str) -> str:
+        """
+        Check if video can be decoded by OpenCV. If not (e.g., AV1 without hardware support),
+        re-encode to H.264 using ffmpeg.
+
+        Args:
+            video_path: Original video path
+
+        Returns:
+            Video path to use (original if decodable, re-encoded if needed)
+        """
+        # Try opening video
+        cap = cv2.VideoCapture(str(video_path))
+
+        # Check if video opened successfully
+        if not cap.isOpened():
+            logger.warning(f"Failed to open video {video_path}")
+            cap.release()
+            return video_path
+
+        # Try reading first frame
+        ret, frame = cap.read()
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        cap.release()
+
+        # If we successfully read a frame and video has reasonable properties, it's decodable
+        if ret and frame is not None and frame_count > 0 and fps > 0:
+            logger.info(f"✅ Video is decodable by OpenCV (codec OK)")
+            return video_path
+
+        # Video cannot be decoded properly - re-encode with ffmpeg
+        logger.warning(f"⚠️ Video codec not supported (possibly AV1 without hardware acceleration)")
+        logger.info(f"Re-encoding video to H.264 for compatibility...")
+
+        # Create temporary file for re-encoded video
+        temp_dir = tempfile.gettempdir()
+        video_name = Path(video_path).stem
+        reencoded_path = os.path.join(temp_dir, f"{video_name}_h264.mp4")
+
+        try:
+            # Re-encode using ffmpeg with H.264 codec
+            # -c:v libx264: Use H.264 codec (widely supported)
+            # -crf 23: Good quality (lower = better, 23 is reasonable)
+            # -preset fast: Faster encoding
+            # -c:a copy: Copy audio without re-encoding
+            cmd = [
+                'ffmpeg',
+                '-i', str(video_path),
+                '-c:v', 'libx264',
+                '-crf', '23',
+                '-preset', 'fast',
+                '-c:a', 'copy',
+                '-y',  # Overwrite output file
+                reencoded_path
+            ]
+
+            logger.info(f"Running: {' '.join(cmd)}")
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=300  # 5 minute timeout
+            )
+
+            if result.returncode != 0:
+                logger.error(f"ffmpeg re-encoding failed: {result.stderr}")
+                return video_path  # Fall back to original
+
+            # Verify re-encoded video works
+            test_cap = cv2.VideoCapture(reencoded_path)
+            test_ret, test_frame = test_cap.read()
+            test_cap.release()
+
+            if test_ret and test_frame is not None:
+                logger.info(f"✅ Successfully re-encoded to H.264: {reencoded_path}")
+                return reencoded_path
+            else:
+                logger.error(f"Re-encoded video still not readable")
+                return video_path
+
+        except subprocess.TimeoutExpired:
+            logger.error("ffmpeg re-encoding timed out (>5 minutes)")
+            return video_path
+        except FileNotFoundError:
+            logger.error("ffmpeg not found - install with: apt-get install ffmpeg")
+            return video_path
+        except Exception as e:
+            logger.error(f"Error during re-encoding: {e}")
+            return video_path
+
     def sample_and_analyze(
         self,
         video_path: str,
@@ -62,6 +157,9 @@ class QuickVisualSampler:
         """
         if not self.models_loaded:
             raise RuntimeError("Models not loaded. Check initialization.")
+
+        # Check if video needs re-encoding (e.g., AV1 without hardware support)
+        video_path = self._check_and_reencode_if_needed(video_path)
 
         # Create frames output directory if specified
         if frames_output_dir:
