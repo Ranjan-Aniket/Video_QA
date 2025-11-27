@@ -22,8 +22,14 @@ from loguru import logger
 
 
 def convert_numpy_types(obj):
-    """Convert numpy types to Python native types for JSON serialization"""
-    if isinstance(obj, np.integer):
+    """Convert numpy types and dataclasses to Python native types for JSON serialization"""
+    from dataclasses import is_dataclass, asdict
+
+    # Handle dataclass instances (TextEmbedding, FrameEmbedding, SpuriousCandidate, etc.)
+    if is_dataclass(obj) and not isinstance(obj, type):
+        # Convert dataclass to dict and recursively process
+        return convert_numpy_types(asdict(obj))
+    elif isinstance(obj, np.integer):
         return int(obj)
     elif isinstance(obj, np.floating):
         return float(obj)
