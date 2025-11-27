@@ -282,6 +282,36 @@ For each detected moment, provide:
   "confidence": 0.95
 }}
 
+Example with non-speech audio_cues:
+{{
+  "frame_ids": [200, 201, 202],
+  "timestamps": [85.0, 85.5, 86.0],
+  "mode": "cluster",
+  "duration": 15.0,
+  "visual_cues": ["Person entering dark room", "Hand reaches toward wall", "Light switch flips"],
+  "audio_cues": ["High-intensity impact sound at switch flip", "Silence before action begins"],
+  "correspondence": "Impact sound synchronizes precisely with visual switch flip moment, silence builds tension",
+  "primary_ontology": "Temporal Understanding",
+  "secondary_ontologies": ["Audio-Visual Stitching"],
+  "adversarial_features": [
+    "Sound effect timing must match exact frame of switch flip",
+    "Silence before action creates temporal contrast",
+    "Requires detecting precise audio-visual synchronization"
+  ],
+  "priority": 0.85,
+  "protected_window": {{
+    "start": 78.0,
+    "end": 100.0,
+    "radius": 2.0
+  }},
+  "frame_extraction": {{
+    "method": "keyframe_sample",
+    "frames": [80.0, 85.5, 90.0],
+    "anchor": 85.5
+  }},
+  "confidence": 0.90
+}}
+
 FRAME EXTRACTION METHODS:
 - "burst": 2-3 frames around anchor (for precise moments)
 - "uniform_sample": Evenly spaced frames in window
@@ -364,13 +394,23 @@ Example for Sequential:
 
 === AUDIO MODALITY DIVERSITY ===
 
-Selected moments should use at least 2 different audio modalities:
-1. SPEECH: Dialogue, narration, words, phrases
-2. MUSIC: Tempo, tone, melody, starts/stops
-3. SOUND EFFECTS: Impacts, whooshes, mechanical sounds, clicks
-4. SILENCE: Pauses, gaps, scene boundaries
+Selected moments should use at least 2 different audio modalities.
+Use the "AUDIO EVENTS (non-speech)" section in the prompt to find non-speech audio:
 
+1. SPEECH: Dialogue, narration, words, phrases (from AUDIO TRANSCRIPT section)
+2. MUSIC: Background music, tempo changes, intro/outro (from AUDIO EVENTS → MUSIC section)
+3. SOUND EFFECTS: Impacts, whooshes, mechanical sounds (from AUDIO EVENTS → SOUND EFFECTS section)
+4. CROWD SOUNDS: Applause, cheering, laughter (from AUDIO EVENTS → CROWD SOUNDS section)
+5. SILENCE: Pauses, gaps, scene boundaries (detected from silence gaps)
+
+IMPORTANT: Include at least 1-2 moments with non-speech audio_cues (music/sound effects/crowd sounds).
 This ensures audio-visual diversity and prevents speech-only moments.
+
+Example audio_cues with non-speech:
+✓ "Background music tempo increases from 90 to 140 BPM"
+✓ "High-intensity impact sound effect"
+✓ "Crowd applause begins"
+✓ "Intro music fades out"
 
 === HALLUCINATION PREVENTION ===
 
@@ -383,7 +423,8 @@ FORBIDDEN HALLUCINATIONS (will be rejected):
 
 ONLY describe what is DIRECTLY OBSERVABLE in:
 - The provided frames (visual)
-- The provided transcript segments (audio)
+- The provided transcript segments (speech)
+- The provided AUDIO EVENTS section (music, sound effects, crowd sounds, tempo changes)
 
 === SPECIAL CASES ===
 

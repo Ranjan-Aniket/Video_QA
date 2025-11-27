@@ -310,13 +310,23 @@ Example for Audio-Visual Stitching:
 
 === AUDIO MODALITY DIVERSITY ===
 
-Selected moments should use at least 2 different audio modalities:
-1. SPEECH: Dialogue, narration, words, phrases
-2. MUSIC: Tempo, tone, melody, starts/stops
-3. SOUND EFFECTS: Impacts, whooshes, mechanical sounds, clicks
-4. SILENCE: Pauses, gaps, scene boundaries
+Selected moments should use at least 2 different audio modalities.
+Use the "AUDIO EVENTS (non-speech)" section in the prompt to find non-speech audio:
 
+1. SPEECH: Dialogue, narration, words, phrases (from FULL VIDEO TRANSCRIPT section)
+2. MUSIC: Background music, tempo changes, intro/outro (from AUDIO EVENTS → MUSIC section)
+3. SOUND EFFECTS: Impacts, whooshes, mechanical sounds (from AUDIO EVENTS → SOUND EFFECTS section)
+4. CROWD SOUNDS: Applause, cheering, laughter (from AUDIO EVENTS → CROWD SOUNDS section)
+5. SILENCE: Pauses, gaps, scene boundaries (detected from silence gaps)
+
+IMPORTANT: Include at least 1-2 moments with non-speech audio_cues (music/sound effects/crowd sounds).
 This ensures audio-visual diversity and prevents speech-only moments.
+
+Example audio_cues with non-speech:
+✓ "Background music tempo increases from 90 to 140 BPM"
+✓ "High-intensity impact sound effect"
+✓ "Crowd applause begins"
+✓ "Intro music fades out"
 
 === HALLUCINATION PREVENTION ===
 
@@ -330,7 +340,8 @@ FORBIDDEN HALLUCINATIONS (will be rejected):
 
 ONLY describe what is DIRECTLY OBSERVABLE in:
 - The provided frames (visual)
-- The provided transcript segments (audio)
+- The provided transcript segments (speech)
+- The provided AUDIO EVENTS section (music, sound effects, crowd sounds, tempo changes)
 
 For INFERENCE type specifically:
 - The QUESTION should ask about unstated WHY/PURPOSE
@@ -347,14 +358,15 @@ For each detected moment, provide:
   "mode": "inference_window",  // or cluster
   "duration": 10.0,
   "visual_cues": ["Person picks up hammer", "Examines nail", "Sets hammer down without using it"],
-  "audio_cues": ["Speaker says 'I realized something was wrong'"],
-  "correspondence": "Audio provides context but doesn't explain WHY hammer wasn't used - must infer from visual sequence",
+  "audio_cues": ["Speaker says 'I realized something was wrong'", "Background music tempo increases from 90 to 120 BPM"],
+  "correspondence": "Audio provides context but doesn't explain WHY hammer wasn't used - must infer from visual sequence, music tempo increase hints at tension",
   "primary_ontology": "Inference",
-  "secondary_ontologies": ["Temporal"],
+  "secondary_ontologies": ["Temporal", "Audio-Visual Stitching"],
   "adversarial_features": [
     "Requires inferring unstated reason (nail already hammered)",
     "Audio provides misdirection (focuses on realization, not the action)",
-    "Easy to miss visual detail (nail state)"
+    "Easy to miss visual detail (nail state)",
+    "Music tempo change corresponds with realization moment"
   ],
   "priority": 0.90,
   "protected_window": {{
