@@ -203,21 +203,26 @@ class MomentValidator:
 
         return True, ""
 
-    def detect_names(
+    def replace_names_with_descriptions(
         self,
-        moment: Dict
-    ) -> Tuple[bool, List[str]]:
+        moment: Dict,
+        vision_data: Dict = None
+    ) -> Tuple[Dict, List[str]]:
         """
-        Detect if names are used in cues
+        Detect names and replace with descriptions from vision metadata
 
         Args:
-            moment: Moment dict
+            moment: Moment dict with visual_cues, audio_cues, correspondence
+            vision_data: Vision data from Phase 3 (clip_analysis)
 
         Returns:
-            (has_names, list_of_names)
+            (cleaned_moment, detected_names)
         """
         if not self.nlp:
-            return False, []
+            return moment, []
+
+        # Get frame IDs from moment
+        frame_ids = moment.get('frame_ids', [])
 
         # Combine all cue text
         all_cues = (
@@ -228,17 +233,103 @@ class MomentValidator:
 
         all_text = " ".join(all_cues)
 
-        # Run NER
+        # Run NER to detect PERSON entities
         doc = self.nlp(all_text)
-
         names = [ent.text for ent in doc.ents if ent.label_ == "PERSON"]
 
-        has_names = len(names) > 0
+        if not names:
+            return moment, []
 
-        if has_names:
-            return False, names  # Invalid if names found
+        # If no vision data provided, just return original moment
+        if not vision_data or not frame_ids:
+            logger.warning(f"Names detected but no vision data available: {names}")
+            return moment, names
 
-        return True, []
+        # Get vision metadata for this moment's frames
+        frame_analyses = vision_data.get('frame_analyses', [])
+
+        # Build frame_id -> vision_data map
+        frame_map = {f['frame_id']: f for f in frame_analyses}
+
+        # Collect descriptions from vision metadata
+        descriptions = []
+        for fid in frame_ids:
+            if fid in frame_map:
+                frame_data = frame_map[fid]
+
+                # Use BLIP-2 caption if available
+                if frame_data.get('caption'):
+                    descriptions.append(frame_data['caption'])
+
+                # Add YOLO object detections (focus on 'person' class)
+                objects = frame_data.get('objects', [])
+                person_objects = [obj for obj in objects if obj.get('class', '').lower() == 'person']
+
+                if person_objects:
+                    # Describe person by position/attributes
+                    for obj in person_objects:
+                        bbox = obj.get('bbox', [])
+                        if len(bbox) == 4:
+                            x, y, w, h = bbox
+                            # Simple spatial descriptor
+                            pos = "center"
+                            if x < 0.33:
+                                pos = "left side"
+                            elif x > 0.66:
+                                pos = "right side"
+                            descriptions.append(f"person on {pos}")
+
+        # Create replacement text from descriptions
+        if descriptions:
+            # Use first available description
+            replacement = descriptions[0]
+
+            # Try to extract just the person description
+            if "person" in replacement.lower():
+                # Keep "person" part of description
+                replacement = "the person"
+            else:
+                replacement = "the individual"
+        else:
+            # Fallback to generic descriptor
+            replacement = "the person"
+
+        # Replace names in moment cues
+        cleaned_moment = moment.copy()
+
+        # Replace in visual_cues
+        if 'visual_cues' in cleaned_moment:
+            cleaned_moment['visual_cues'] = [
+                self._replace_names_in_text(cue, names, replacement)
+                for cue in cleaned_moment['visual_cues']
+            ]
+
+        # Replace in audio_cues
+        if 'audio_cues' in cleaned_moment:
+            cleaned_moment['audio_cues'] = [
+                self._replace_names_in_text(cue, names, replacement)
+                for cue in cleaned_moment['audio_cues']
+            ]
+
+        # Replace in correspondence
+        if 'correspondence' in cleaned_moment:
+            cleaned_moment['correspondence'] = self._replace_names_in_text(
+                cleaned_moment['correspondence'],
+                names,
+                replacement
+            )
+
+        logger.info(f"Replaced names {names} with '{replacement}'")
+
+        return cleaned_moment, names
+
+    def _replace_names_in_text(self, text: str, names: List[str], replacement: str) -> str:
+        """Replace all occurrences of names with replacement"""
+        for name in names:
+            # Case-insensitive replacement
+            import re
+            text = re.sub(re.escape(name), replacement, text, flags=re.IGNORECASE)
+        return text
 
     def validate_intro_outro(
         self,
@@ -347,7 +438,8 @@ class MomentValidator:
         pass2b_results: Dict,
         available_frames: Set[int],
         audio_analysis: Dict,
-        video_duration: float
+        video_duration: float,
+        vision_data: Dict = None
     ) -> Dict:
         """
         Validate all moments from Pass 2A + 2B
@@ -358,6 +450,7 @@ class MomentValidator:
             available_frames: Set of available frame IDs
             audio_analysis: Audio analysis
             video_duration: Video duration in seconds
+            vision_data: Vision data from Phase 3 (CLIP analysis) for name replacement
 
         Returns:
             {
@@ -422,11 +515,12 @@ class MomentValidator:
             #     errors.append(f"Timestamp alignment: {error}")
             #     validation_stats['timestamp_alignment_failed'] += 1
 
-            # 4. Name detection (DISABLED - will implement name replacement with vision metadata later)
-            # is_valid, names = self.detect_names(moment)
-            # if not is_valid:
-            #     errors.append(f"Names detected: {names}")
-            #     validation_stats['names_detected'] += 1
+            # 4. Name replacement (replace names with descriptions from vision metadata)
+            cleaned_moment, detected_names = self.replace_names_with_descriptions(moment, vision_data)
+            if detected_names:
+                logger.info(f"  Replaced names in moment: {detected_names}")
+                moment = cleaned_moment  # Use cleaned moment for further validation
+                validation_stats['names_detected'] += 1
 
             # 5. Intro/outro check
             is_valid, error = self.validate_intro_outro(moment, video_duration)
@@ -489,7 +583,8 @@ def run_validation(
     available_frames: Set[int],
     audio_analysis: Dict,
     video_duration: float,
-    output_path: str
+    output_path: str,
+    vision_data: Dict = None
 ) -> Dict:
     """
     Run validation and save results
@@ -501,6 +596,7 @@ def run_validation(
         audio_analysis: Audio analysis
         video_duration: Video duration
         output_path: Path to save results
+        vision_data: Vision data from Phase 3 (optional, for name replacement)
 
     Returns:
         Validation results
@@ -512,7 +608,8 @@ def run_validation(
         pass2b_results,
         available_frames,
         audio_analysis,
-        video_duration
+        video_duration,
+        vision_data=vision_data
     )
 
     # Save results

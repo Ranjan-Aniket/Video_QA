@@ -1520,7 +1520,8 @@ class AdversarialSmartPipeline:
             available_frames=available_frames,
             audio_analysis=self.audio_analysis,
             video_duration=self.audio_analysis.get('duration', 0),
-            output_path=str(validation_path)
+            output_path=str(validation_path),
+            vision_data=self.clip_analysis  # Pass vision data for name replacement
         )
 
         phase_time = (datetime.now() - phase_start).total_seconds()
