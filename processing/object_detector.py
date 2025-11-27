@@ -325,11 +325,28 @@ class ObjectDetector:
 
         try:
             # Run YOLO inference
-            results = self.model(
-                frame,
-                conf=self.confidence_threshold,
-                verbose=False  # Suppress YOLO console output
-            )
+            # Retry once if AttributeError occurs (batchnorm fusion issue)
+            try:
+                results = self.model(
+                    frame,
+                    conf=self.confidence_threshold,
+                    verbose=False  # Suppress YOLO console output
+                )
+            except AttributeError as attr_err:
+                if "bn" in str(attr_err):
+                    logger.warning("YOLO fusion error, reinitializing model...")
+                    self.model = None
+                    self._init_model()
+                    if self.model is None:
+                        return []
+                    # Retry inference
+                    results = self.model(
+                        frame,
+                        conf=self.confidence_threshold,
+                        verbose=False
+                    )
+                else:
+                    raise
 
             # Parse detections
             detections = []
