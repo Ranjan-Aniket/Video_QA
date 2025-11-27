@@ -44,56 +44,18 @@ class Pass3QAGenerator:
             openai_api_key=os.getenv("OPENAI_API_KEY")
         )
 
-    def build_batch_prompt(
-        self,
-        moments: List[Dict],
-        video_id: str
-    ) -> str:
-        """
-        Build prompt for batch QA generation
+        # Build cacheable system prompt (reused across all videos)
+        self._cached_system_prompt = self._build_cached_system_prompt()
 
-        Args:
-            moments: List of validated moments (up to 12)
-            video_id: Video identifier
+    def _build_cached_system_prompt(self) -> str:
+        """
+        Build CACHEABLE system prompt with all static guidelines.
+        This will be reused across ALL videos (90% cost reduction on this part).
 
         Returns:
-            Prompt string
+            System prompt string
         """
-        prompt = f"""You are generating adversarial Q&A pairs for video: {video_id}
-
-TASK: Generate 1-2 questions per moment that will STUMP Gemini.
-
-MOMENTS PROVIDED: {len(moments)}
-
-"""
-
-        # Add each moment
-        for i, moment in enumerate(moments, 1):
-            prompt += f"""
-=== MOMENT {i} ===
-
-Ontology: {moment.get('primary_ontology')} (secondary: {', '.join(moment.get('secondary_ontologies', []))})
-Mode: {moment.get('mode')}
-Duration: {moment.get('duration')}s
-Timestamps: {moment.get('timestamps')}
-
-VISUAL CUES:
-{chr(10).join(f"- {vc}" for vc in moment.get('visual_cues', []))}
-
-AUDIO CUES:
-{chr(10).join(f"- {ac}" for ac in moment.get('audio_cues', []))}
-
-CORRESPONDENCE:
-{moment.get('correspondence', '')}
-
-ADVERSARIAL FEATURES:
-{chr(10).join(f"- {af}" for af in moment.get('adversarial_features', []))}
-
-"""
-
-        prompt += """
-
-=== QA GENERATION GUIDELINES ===
+        return """=== QA GENERATION GUIDELINES ===
 
 For each moment, generate 1-2 questions that:
 
@@ -234,10 +196,10 @@ VERIFICATION CHECKLIST before finalizing each answer:
 
 For each moment, output:
 
-{{
+{
   "moment_id": 1,
   "questions": [
-    {{
+    {
       "question": "When the speaker says 'look at the label', what specific text is visible on the shirt?",
       "answer": "TO THE NUIUN 9 LABLL 2,6080",
       "visual_cue": "Text 'TO THE NUIUN 9 LABLL 2,6080' visible on shirt label",
@@ -246,17 +208,17 @@ For each moment, output:
       "end_time": 58.5,
       "primary_task_type": "Needle",
       "sub_task_types": ["Referential"],
-      "validation": {{
+      "validation": {
         "audio_only_answerable": false,
         "visual_only_answerable": false,
         "both_cues_in_question": true,
         "names_used": false,
         "exploits_adversarial_features": true
-      }},
+      },
       "adversarial_rationale": "Text is partially occluded and easy to misread. Requires matching speech timing to text visibility. Audio-only would miss the exact text."
-    }}
+    }
   ]
-}}
+}
 
 === CONSTRAINTS ===
 
@@ -268,12 +230,59 @@ For each moment, output:
 Return JSON array:
 
 [
-  {{ "moment_id": 1, "questions": [...] }},
-  {{ "moment_id": 2, "questions": [...] }},
+  { "moment_id": 1, "questions": [...] },
+  { "moment_id": 2, "questions": [...] },
   ...
 ]
 
-Generate Q&A pairs now. Be ruthless about quality - only generate questions that will truly challenge Gemini.
+Generate Q&A pairs now. Be ruthless about quality - only generate questions that will truly challenge Gemini."""
+
+    def build_batch_prompt(
+        self,
+        moments: List[Dict],
+        video_id: str
+    ) -> str:
+        """
+        Build FRESH user prompt with video-specific moment data.
+        This changes per video/batch.
+
+        Args:
+            moments: List of validated moments (up to 12)
+            video_id: Video identifier
+
+        Returns:
+            User prompt string
+        """
+        prompt = f"""Generate adversarial Q&A pairs for video: {video_id}
+
+TASK: Generate 1-2 questions per moment that will STUMP Gemini.
+
+MOMENTS PROVIDED: {len(moments)}
+
+"""
+
+        # Add each moment
+        for i, moment in enumerate(moments, 1):
+            prompt += f"""
+=== MOMENT {i} ===
+
+Ontology: {moment.get('primary_ontology')} (secondary: {', '.join(moment.get('secondary_ontologies', []))})
+Mode: {moment.get('mode')}
+Duration: {moment.get('duration')}s
+Timestamps: {moment.get('timestamps')}
+
+VISUAL CUES:
+{chr(10).join(f"- {vc}" for vc in moment.get('visual_cues', []))}
+
+AUDIO CUES:
+{chr(10).join(f"- {ac}" for ac in moment.get('audio_cues', []))}
+
+CORRESPONDENCE:
+{moment.get('correspondence', '')}
+
+ADVERSARIAL FEATURES:
+{chr(10).join(f"- {af}" for af in moment.get('adversarial_features', []))}
+
 """
 
         return prompt
@@ -284,26 +293,35 @@ Generate Q&A pairs now. Be ruthless about quality - only generate questions that
         video_id: str
     ) -> Dict:
         """
-        Call Sonnet 4.5 to generate QA pairs for a batch
+        Call Sonnet 4.5 to generate QA pairs for a batch WITH PROMPT CACHING.
+
+        System prompt (guidelines) is cached after first use - 90% cost reduction!
 
         Args:
             moments: Batch of moments
             video_id: Video identifier
 
         Returns:
-            Generated QA pairs
+            Generated QA pairs with cost breakdown
         """
         logger.info(f"Generating QA pairs for batch of {len(moments)} moments...")
 
-        # Build prompt
-        prompt = self.build_batch_prompt(moments, video_id)
+        # Build fresh user prompt (video-specific data)
+        user_prompt = self.build_batch_prompt(moments, video_id)
 
         try:
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=8000,
+                system=[
+                    {
+                        "type": "text",
+                        "text": self._cached_system_prompt,
+                        "cache_control": {"type": "ephemeral"}  # 🔥 CACHE THIS!
+                    }
+                ],
                 messages=[
-                    {"role": "user", "content": prompt}
+                    {"role": "user", "content": user_prompt}
                 ]
             )
 
@@ -319,22 +337,48 @@ Generate Q&A pairs now. Be ruthless about quality - only generate questions that
 
             result = json.loads(json_match.group(0))
 
-            # Track cost
-            input_tokens = response.usage.input_tokens
-            output_tokens = response.usage.output_tokens
-            cost = (input_tokens * 3 / 1_000_000) + (output_tokens * 15 / 1_000_000)
+            # Track cost WITH CACHING (Sonnet 4.5 pricing)
+            usage = response.usage
+            input_tokens = usage.input_tokens
+            output_tokens = usage.output_tokens
+
+            # Check cache usage
+            cache_creation_tokens = getattr(usage, 'cache_creation_input_tokens', 0)
+            cache_read_tokens = getattr(usage, 'cache_read_input_tokens', 0)
+
+            # Calculate cost
+            # Regular input: $3.00/MTok, Cache write: $3.75/MTok, Cache read: $0.30/MTok, Output: $15/MTok
+            cost = (
+                (input_tokens * 3.00 / 1_000_000) +
+                (cache_creation_tokens * 3.75 / 1_000_000) +
+                (cache_read_tokens * 0.30 / 1_000_000) +
+                (output_tokens * 15.00 / 1_000_000)
+            )
+
+            # Log cache performance
+            if cache_read_tokens > 0:
+                cache_savings = (cache_read_tokens * 2.70 / 1_000_000)  # Saved $2.70/MTok
+                logger.info(f"  💰 Cache HIT! Read {cache_read_tokens} tokens (saved ${cache_savings:.4f})")
+            elif cache_creation_tokens > 0:
+                logger.info(f"  📝 Cache WRITE: {cache_creation_tokens} tokens written to cache")
+
+            logger.info(f"  Cost: ${cost:.4f} (input: ${input_tokens * 3.00 / 1_000_000:.4f}, output: ${output_tokens * 15.00 / 1_000_000:.4f})")
 
             return {
                 'qa_pairs': result,
                 'cost': cost,
                 'tokens': {
                     'input': input_tokens,
-                    'output': output_tokens
+                    'output': output_tokens,
+                    'cache_creation': cache_creation_tokens,
+                    'cache_read': cache_read_tokens
                 }
             }
 
         except Exception as e:
             logger.error(f"Sonnet 4.5 call failed: {e}")
+            import traceback
+            traceback.print_exc()
             return {"qa_pairs": [], "error": str(e), "cost": 0}
 
     def generate_qa_pairs(
