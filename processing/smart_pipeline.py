@@ -1387,6 +1387,29 @@ class AdversarialSmartPipeline:
         logger.info(f"   Spurious candidates: {len(self.clip_analysis['spurious_candidates'])}")
         logger.info(f"   Visual anomalies: {len(self.clip_analysis['visual_anomalies'])}")
 
+        # ✅ CRITICAL: Merge vision data from frame_analyses into visual_samples
+        # Pass 1/2A/2B expect frames with YOLO objects, poses, scene_type, etc.
+        logger.info("Merging vision data from Phase 3 into frame metadata...")
+        frame_analyses_dict = {
+            f['frame_id']: f
+            for f in self.clip_analysis.get('frame_analyses', [])
+        }
+
+        for frame in self.visual_samples:
+            frame_id = frame.get('frame_id')
+            if frame_id in frame_analyses_dict:
+                vision_data = frame_analyses_dict[frame_id]
+                # Merge all vision model results into frame metadata
+                frame['objects'] = vision_data.get('objects', [])
+                frame['object_count'] = vision_data.get('object_count', 0)
+                frame['poses'] = vision_data.get('poses', {})
+                frame['scene_type'] = vision_data.get('scene_type', 'unknown')
+                frame['scene_attributes'] = vision_data.get('scene_attributes', [])
+                frame['clip_embedding'] = vision_data.get('clip_embedding', [])
+
+        logger.info(f"✅ Merged vision data for {len(self.visual_samples)} frames")
+        logger.info(f"   Each frame now has: objects, poses, scene_type, scene_attributes, CLIP embedding")
+
     def _run_pass1_filter(self):
         """Pass 1: Smart Pre-Filter (3-Tier Selection)"""
         phase_start = datetime.now()
