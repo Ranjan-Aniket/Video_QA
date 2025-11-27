@@ -178,6 +178,13 @@ class QuickVisualSampler:
         if skipped_count > 0:
             logger.info(f"  Skipped {skipped_count} low-quality frames (< {min_quality:.2f})")
 
+        # Save frames_metadata.json for Phase 8
+        if frames_dir:
+            metadata_path = frames_dir / "frames_metadata.json"
+            with open(metadata_path, 'w') as f:
+                json.dump(samples, f, indent=2)
+            logger.info(f"✅ Saved frames metadata to: {metadata_path}")
+
         return {
             'samples': samples,
             'total_sampled': len(samples),
