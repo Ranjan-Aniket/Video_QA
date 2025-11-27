@@ -92,34 +92,29 @@ class Pass2ASonnetSelector:
             "Subscene": "Bounded segments - 5-15 second segments worth captioning as complete mini-stories"
         }
 
-        # Mode definitions with duration guidelines (CORRECTED per Guidelines PDF)
-        # ✅ P0 GAP #1 & #11 FIX: Align mode assignments with minimum temporal window requirements
-        # Mode duration should accommodate the minimum temporal window needed for questions
+        # Mode definitions with duration guidelines (per Guidelines PDF)
+        # Modes define the temporal granularity of moment detection
         self.mode_definitions = {
             "precise": {
                 "duration": "1-5s",
                 "types": ["Needle", "Referential Grounding"],
-                "description": "Exact timestamp critical, single frame or 2-3 frame burst",
-                "min_windows": "10s (precise extraction, wide context window)"
+                "description": "Exact timestamp critical, single frame or 2-3 frame burst"
             },
             "micro_temporal": {
                 "duration": "3-8s",
                 "types": ["Comparative", "Temporal Understanding", "Object Interaction Reasoning"],
-                "description": "Short observations - quick comparisons, state changes, object transformations",
-                "min_windows": "10s (short temporal window requirements)"
+                "description": "Short observations - quick comparisons, state changes, object transformations"
             },
             "inference_window": {
                 "duration": "8-15s",
-                "types": ["Inference", "General Holistic Reasoning", "Context", "Counting"],  # ✅ ADDED: Context (20s) and Counting (10s)
-                "description": "Broader context needed, multi-step reasoning, scene understanding",
-                "min_windows": "10-20s (medium temporal window requirements)"
+                "types": ["Inference", "General Holistic Reasoning", "Context", "Counting"],
+                "description": "Broader context needed, multi-step reasoning, scene understanding"
             },
             "cluster": {
                 "duration": "15-60s",
                 "types": ["Sequential", "Subscene",
                          "Audio-Visual Stitching", "Tackling Spurious Correlations"],
-                "description": "Extended continuous action, progression over time, temporal changes",
-                "min_windows": "20-40s (high temporal window requirements)"
+                "description": "Extended continuous action, progression over time, temporal changes"
             }
         }
 
@@ -917,12 +912,12 @@ Total frames in this batch: {len(frames)}
                 rejection_reason = f"Frame content: {reason}"
                 validation_stats['frame_content'] += 1
 
-            # ✅ Validation #2: Temporal window for question type (CHEAP - just math)
-            if rejection_reason is None:
-                is_valid, reason = self.validate_temporal_window_for_type(moment)
-                if not is_valid:
-                    rejection_reason = f"Temporal window: {reason}"
-                    validation_stats['temporal_window'] += 1
+            # ❌ REMOVED: Temporal window validation (not in official PDF guidelines)
+            # if rejection_reason is None:
+            #     is_valid, reason = self.validate_temporal_window_for_type(moment)
+            #     if not is_valid:
+            #         rejection_reason = f"Temporal window: {reason}"
+            #         validation_stats['temporal_window'] += 1
 
             # ✅ Validation #3: Mode duration (CHEAP - simple math)
             if rejection_reason is None:

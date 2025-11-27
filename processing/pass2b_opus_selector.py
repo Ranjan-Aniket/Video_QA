@@ -270,44 +270,6 @@ Examples:
 ❌ NO PROPER NAMES in visual_cues or audio_cues:
 - FORBIDDEN: Person names, brand names, team names, character names
 - USE GENERIC DESCRIPTORS: "person", "speaker", "brand logo", "team", "character"
-
-═══════════════════════════════════════════════════════════════════════════════
-MINIMUM TEMPORAL WINDOWS BY QUESTION TYPE (CRITICAL)
-═══════════════════════════════════════════════════════════════════════════════
-
-Each question type requires a MINIMUM temporal window (protected_window span):
-
-SIMPLE OBSERVATION (10-15s minimum):
-• Needle: 10s
-• Counting: 10s
-• Referential Grounding: 10s
-
-MODERATE COMPLEXITY (20-25s minimum):
-• Audio-Visual Stitching: 20s
-• Context: 20s
-• General Holistic Reasoning: 20s
-• Inference: 20s
-
-HIGH COMPLEXITY (30-40s minimum):
-• Sequential: 30s
-• Temporal Understanding: 30s
-• Subscene: 30s
-• Object Interaction Reasoning: 30s
-
-VERY HIGH COMPLEXITY (40-60s minimum):
-• Comparative: 40s
-• Tackling Spurious Correlations: 40s
-
-⚠️ VALIDATION: protected_window.start to protected_window.end MUST span ≥ minimum for primary_ontology.
-
-Example for Sequential:
-✓ VALID: {{"start": 10.0, "end": 42.0}}  // 32s span ≥ 30s minimum
-✗ INVALID: {{"start": 10.0, "end": 25.0}}  // 15s span < 30s minimum → REJECT
-
-Example for Audio-Visual Stitching:
-✓ VALID: {{"start": 5.0, "end": 28.0}}  // 23s span ≥ 20s minimum
-✗ INVALID: {{"start": 5.0, "end": 18.0}}  // 13s span < 20s minimum → REJECT
-
 === AUDIO MODALITY DIVERSITY ===
 
 Selected moments should use at least 2 different audio modalities.
@@ -922,12 +884,12 @@ CLIP detected potential semantic mismatches:
                 rejection_reason = f"Frame content: {reason}"
                 validation_stats['frame_content'] += 1
 
-            # ✅ Validation #2: Temporal window for question type (CHEAP - just math)
-            if rejection_reason is None:
-                is_valid, reason = self.validate_temporal_window_for_type(moment)
-                if not is_valid:
-                    rejection_reason = f"Temporal window: {reason}"
-                    validation_stats['temporal_window'] += 1
+            # ❌ REMOVED: Temporal window validation (not in official PDF guidelines)
+            # if rejection_reason is None:
+            #     is_valid, reason = self.validate_temporal_window_for_type(moment)
+            #     if not is_valid:
+            #         rejection_reason = f"Temporal window: {reason}"
+            #         validation_stats['temporal_window'] += 1
 
             # ✅ Validation #3: Mode duration (CHEAP - simple math)
             if rejection_reason is None:
