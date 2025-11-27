@@ -428,7 +428,21 @@ ONLY describe what is DIRECTLY OBSERVABLE in:
 - If before/after pattern → Flag for Opus 4 (Comparative)
 - If semantic mismatch → Flag for Opus 4 (Spurious)
 
-Return JSON with moments and flagged_for_opus4 array."""
+=== OUTPUT JSON FORMAT ===
+
+Return JSON:
+{{
+  "moments": [...],  // Array of moment objects (format shown above)
+  "flagged_for_opus4": [  // Frames needing deeper Opus 4 analysis
+    {{"frame_id": 123, "reason": "Comparative - before/after pattern detected"}},
+    {{"frame_id": 456, "reason": "Spurious - semantic mismatch between audio and visual"}}
+  ],
+  "coverage": {{
+    "Needle": 2,
+    "Counting": 1,
+    ...
+  }}
+}}"""
 
     def validate_frame_for_ontology(self, frame: dict, ontology_type: str) -> tuple[bool, str]:
         """

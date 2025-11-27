@@ -574,7 +574,21 @@ Begin deep analysis. Use your full reasoning capabilities - these are the hardes
         frame_ids_to_process = set()
 
         for f in flagged_frames:
-            frame_ids_to_process.update(f.get('frame_ids', []))
+            # ✅ FIX: Handle multiple flagged_for_opus4 formats from Pass 2A
+            # Format 1: {"frame_ids": [123, 456]} (expected)
+            # Format 2: {"frame_id": 123} (Sonnet sometimes returns this)
+            # Format 3: 123 (raw integer - fallback)
+            if isinstance(f, dict):
+                if 'frame_ids' in f:
+                    frame_ids_to_process.update(f['frame_ids'])
+                elif 'frame_id' in f:
+                    frame_ids_to_process.add(f['frame_id'])
+                else:
+                    logger.warning(f"Flagged frame has no frame_id(s): {f}")
+            elif isinstance(f, int):
+                frame_ids_to_process.add(f)
+            else:
+                logger.warning(f"Unknown flagged frame format: {type(f)} - {f}")
 
         for sc in spurious_candidates:
             # ✅ FIXED: Use validated extraction method
